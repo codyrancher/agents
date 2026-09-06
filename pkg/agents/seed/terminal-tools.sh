@@ -134,8 +134,10 @@ fi
 
 if ! command -v tmux >/dev/null 2>&1; then
   echo "[tools] installing tmux"
-  apt-get update -qq
-  apt-get install -y -qq tmux </dev/null
+  # Wait for apt's lock rather than fail on it: every pane of a pod that just started runs
+  # this at once, and the first one holds the lock for the others.
+  apt-get -o DPkg::Lock::Timeout=180 update -qq
+  apt-get -o DPkg::Lock::Timeout=180 install -y -qq tmux </dev/null
 fi
 
 if [ ! -x "$CLAUDE_BIN" ]; then

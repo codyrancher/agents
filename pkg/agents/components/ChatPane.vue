@@ -95,11 +95,16 @@ export default {
       return (this.shellAt >= 0 && this.argv[this.shellAt + 3]) || this.home;
     },
 
-    /** `kubectl exec ...` up to `--`, without the TTY flags, when the pane is in another pod. */
+    /**
+     * Everything up to the `--` of a `kubectl exec`, without the TTY flags, when the pane is in
+     * another pod. The kubectl may be wrapped (a shell that sets PATH first, say); what marks it
+     * is `kubectl` followed by `exec` somewhere before the `--`.
+     */
     prefix() {
       const dash = this.argv.indexOf('--');
+      const k = this.argv.findIndex((arg, i) => arg === 'kubectl' && this.argv[i + 1] === 'exec');
 
-      if (this.argv[0] !== 'kubectl' || dash < 0) {
+      if (k < 0 || dash < k) {
         return [];
       }
 
