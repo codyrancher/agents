@@ -1,0 +1,388 @@
+/*
+ * The Extension Studio design system.
+ *
+ * Every value here is read off the Figma file ("Rancher Extension Studio - AI Authoring",
+ * Foundations page, node 28:2) rather than eyeballed, so any one of them can be checked
+ * against the source. The names match the Figma variable names: `brand/green-500` in the
+ * file is `--studio-green-500` here, `status/warning-bg` is `--studio-warning-bg`, and so
+ * on. That correspondence is the point - when the design changes, the diff is obvious.
+ *
+ * Plain CSS imported from a .ts rather than SCSS in a component, for the reason the Dev
+ * extension's tokens file gives: the shell prepends its own SCSS to every component
+ * stylesheet, so a `@use` written in one is never the first rule in the sheet and sass
+ * refuses it.
+ *
+ * Two rules about what these values are:
+ *
+ * 1. Where the design and Rancher disagree on something *themed*, Rancher wins. The
+ *    concept is a light-mode document and the dashboard has a dark mode it never
+ *    considers, so the structural colours (surface, text, border, brand) resolve through
+ *    the shell's own variables and keep the Figma value only as the fallback.
+ * 2. The semantic tints (status, diff) have no shell equivalent worth borrowing, so they
+ *    are literal - and therefore need the `.theme-dark` block at the bottom, because a
+ *    #FDF6E3 warning wash on a near-black panel is a lamp, not a background.
+ */
+
+/*
+ * Declared on `body`, not `:root`, and that is the difference between this following
+ * Rancher's theme and never following it.
+ *
+ * A custom property's value is substituted in the scope it is *declared* in. Rancher defines
+ * --body-bg, --body-text and the rest on `body` - they are unset on `:root` - so a token
+ * written `var(--body-bg, #FFFFFF)` on `:root` resolves against an element where that variable
+ * does not exist and takes the fallback. Permanently. The computed result then inherits down,
+ * so every descendant sees the light value even in dark mode: the shell went dark around an
+ * extension that stayed white, and the diff view rendered white text on a pale green ground.
+ *
+ * Declaring them here puts the substitution in the same scope as the variables they read.
+ */
+body {
+  /* ---------------------------------------------------------------- Brand */
+  --studio-green-050: #EEF5EF;
+  --studio-green-100: #D2E5D5;
+  --studio-green-500: #3E8C4F;
+  --studio-green-600: #337041;
+  --studio-green-700: #275632;
+
+  /* --------------------------------------------------------------- Accent */
+  --studio-blue-050: #EAF4FB;
+  --studio-blue-500: #3D98D3;
+  --studio-blue-600: #2C7BB0;
+
+  /* ------------------------------------------------------------- Surfaces --
+   * Only `surface` has a shell equivalent. The other two are literals under
+   * rule 2, for two reasons that both point the same way:
+   *
+   * 1. Foundations gives them different values - surface/subtle #F7F8FA and
+   *    surface/nav #F2F3F5 - and one shell variable cannot carry two. Routed
+   *    through `--nav-bg` they collapsed onto each other.
+   * 2. `--nav-bg` is not the colour either of them is. In Rancher's light
+   *    theme it is #FFFFFF, so the wash that separates a rail, a panel head
+   *    or a hovered row from the page behind it disappeared entirely.
+   *
+   * Being literals, they need the `body.theme-dark` block at the bottom, the
+   * same as the status and diff tints. */
+  --studio-surface:           var(--body-bg, #FFFFFF);
+  --studio-surface-subtle:    #F7F8FA;
+  /**
+   * A surface that reads as cut INTO the panel rather than laid on it.
+   *
+   * `subtle` is the other direction - a shade away from the surface, and in the dark theme a
+   * shade *lighter* than it, which is right for a chip and wrong for a well. This one is always
+   * darker than whatever it sits on, so with the inset shadow that goes with it (see the
+   * change-set cards) it reads as a recess in both themes rather than a raised tile in one.
+   */
+  --studio-surface-inset:     #EDEFF3;
+  --studio-inset-shadow:      inset 0 1px 3px rgba(20, 20, 25, 0.10);
+  /**
+   * The other half of the pair: a surface that sits ON the panel rather than in it.
+   *
+   * A drop shadow and a lighter fill, so that against the recess above it the two read as
+   * opposite sides of the same surface. Used by the conversation, where one speaker is raised
+   * and the other set back, and the alternation is what says whose turn is whose.
+   */
+  --studio-surface-raised:    #FFFFFF;
+  --studio-raised-shadow:     0 1px 2px rgba(20, 20, 25, 0.12), 0 1px 0 rgba(255, 255, 255, 0.6) inset;
+  --studio-surface-nav:       #F2F3F5;
+  /* The terminal keeps its own two greys in both themes: it is a terminal. */
+  --studio-surface-terminal:     #1B1C21;
+  --studio-surface-terminal-alt: #26272E;
+  /* Paired with the two above, and fixed for the same reason: a terminal is a terminal in
+   * both themes, so its foreground does not follow --body-text either. */
+  --studio-terminal-text:        #D5D6DB;
+
+  /* --------------------------------------------------------------- Border */
+  /*
+   * Three tiers, derived rather than borrowed.
+   *
+   * The design leans on the step between them - node 14:389 puts an #E5E6EB divider directly
+   * under a #DCDDE3 panel edge - but Rancher Prime has no such step to lend: --border and
+   * --input-border are both #dcdee7 in its light theme, so borrowing all three collapsed a
+   * card outline, a row divider and an input outline into one indistinguishable colour.
+   *
+   * So only the middle tier is borrowed, and the other two are mixed off it: subtle toward the
+   * page, strong toward the text. That keeps the design's *relationship* under any theme and
+   * any brand, which is the part that carries meaning - rather than keeping its literal values
+   * and going blind to the theme, or keeping the theme and going flat.
+   */
+  --studio-border:        var(--border, #DCDDE3);
+  --studio-border-subtle: color-mix(in srgb, var(--border, #DCDDE3) 55%, var(--body-bg, #FFFFFF));
+  --studio-border-strong: color-mix(in srgb, var(--border, #DCDDE3) 62%, var(--body-text, #141419));
+  --studio-border-focus:  var(--outline, #3D98D3);
+
+  /* ----------------------------------------------------------------- Text */
+  --studio-text:           var(--body-text, #141419);
+  --studio-text-secondary: var(--muted, #61616B);
+  /* Same problem as the borders: Prime has one --muted (#6f6f8b) where the design has two
+   * greys, so secondary and tertiary text read identically. Tertiary is the quieter of the
+   * pair, so it is mixed back toward the page. */
+  --studio-text-tertiary:  color-mix(in srgb, var(--muted, #8B8B96) 74%, var(--body-bg, #FFFFFF));
+  --studio-text-link:      var(--link, #3D98D3);
+  --studio-text-inverse:   #FFFFFF;
+
+  /* --------------------------------------------------------------- Status --
+   * The file's note: these are the colours the Rancher cluster table already
+   * uses, so a Failed extension reads the way a Failed cluster does. */
+  --studio-success:     #3E8C4F;
+  --studio-success-bg:  #EBF4EC;
+  --studio-info:        #3D98D3;
+  --studio-info-bg:     #DEEBF7;
+  --studio-warning:     #C9A227;
+  --studio-warning-bg:  #FDF6E3;
+  --studio-error:       #F64747;
+  --studio-error-bg:    #FDECEC;
+  --studio-neutral:     #8B8B96;
+  --studio-neutral-bg:  #F0F1F4;
+
+  /* ------------------------------------------------------- Empty control --
+   * A control that is waiting to be answered, rather than one that is off.
+   *
+   * 39:1330 draws the unanswered verdict segments as #F2F3F5 on white - the nav wash, a step
+   * down from the page, inside the same #DCDDE3 stroke every other control wears. In light
+   * that is enough on its own: the fill is a step, the stroke is an edge, and the labels sit
+   * on a near-white ground.
+   *
+   * In dark none of the three survives being reused. The wash is +7% white on a #25282F panel
+   * (1.24:1), the stroke is #38404B against that wash (1.14:1 - no edge at all), and the
+   * result reads as a disabled control on the one screen whose whole job is collecting the
+   * answers. So the *relationship* is restated for dark rather than the values, which is why
+   * these are named for the state instead of pointing at surface/border directly.
+   */
+  --studio-control-empty:        var(--studio-surface-nav);
+  --studio-control-empty-border: var(--studio-border);
+  --studio-control-empty-text:   var(--studio-text-secondary);
+
+  /*
+   * What to write on a saturated status fill.
+   *
+   * The design says white on all three, and none of the three survives being checked. WCAG's
+   * relaxed 3:1 threshold is for *large* text - 24px, or 18.66px bold - and every one of these
+   * fills carries a label well under that: the verdict segments are 12px/600, the tab count is
+   * 11px/600, the criterion badge 12px/600. So all of them need 4.5:1, and white gives:
+   *
+   *     #3E8C4F success  4.14   (the same value in both themes)
+   *     #F64747 error    3.55   light      #FF6B6B error    2.78   dark
+   *     #C9A227 warning  2.42   light      #E0BC4A warning  1.83   dark
+   *
+   * One ink clears all five, so there is one value rather than three. It is a shade under the
+   * body ink (#141419), which is not arbitrary: #141419 reaches 4.43:1 on the green, just below
+   * the line, and green is the tightest of the five because it is the darkest fill.
+   *
+   *     #0E0E12 on success 4.65 · on error 5.42 light / 6.94 dark · on warning 7.96 / 10.51
+   *
+   * The three names are kept so a call site still says which fill it is writing on, and so a
+   * later retheme can pull one hue apart from the others without touching the others' rules.
+   * This is a deliberate departure from the frame, on the grounds that the frame is wrong.
+   */
+  --studio-on-status:   #0E0E12;
+  --studio-on-success:  var(--studio-on-status);
+  --studio-on-error:    var(--studio-on-status);
+  --studio-on-warning:  var(--studio-on-status);
+
+  /* ----------------------------------------------------------------- Diff */
+  --studio-diff-added-bg:     #EAF5EC;
+  --studio-diff-added-text:   #276B33;
+  --studio-diff-removed-bg:   #FDECEC;
+  --studio-diff-removed-text: #B32424;
+
+  /* ----------------------------------------------------------------- Type --
+   * Lato as Rancher ships it; JetBrains Mono for code, diffs and terminal
+   * output - the one place the file lets a second family in. Both resolve
+   * through the shell's stack first so a retheme carries. */
+  --studio-font:      var(--body-font, 'Lato', 'Helvetica Neue', Arial, sans-serif);
+  --studio-font-mono: 'JetBrains Mono', 'SFMono-Regular', Menlo, Consolas, monospace;
+
+  /* `font:` shorthands, so a rule is one line and cannot drift in weight. */
+  --studio-display-32: 700 32px/1.25 var(--studio-font);
+  --studio-heading-24: 600 24px/1.333 var(--studio-font);
+  --studio-heading-20: 600 20px/1.4 var(--studio-font);
+  --studio-heading-16: 600 16px/1.5 var(--studio-font);
+  --studio-heading-14: 600 14px/1.4286 var(--studio-font);
+  --studio-body-16:    400 16px/1.5 var(--studio-font);
+  --studio-body-14:    400 14px/1.4286 var(--studio-font);
+  --studio-body-13:    400 13px/1.3846 var(--studio-font);
+  --studio-body-13-semi: 600 13px/1.3846 var(--studio-font);
+  --studio-caption-12: 400 12px/1.3333 var(--studio-font);
+  --studio-caption-12-semi: 600 12px/1.3333 var(--studio-font);
+  --studio-caption-11-caps: 600 11px/1.2727 var(--studio-font);
+  --studio-mono-12:    400 12px/1.5 var(--studio-font-mono);
+  /* Mono/11, the size the file sets a route or a path at when it is a caption rather than
+   * code - the provenance line under a verification criterion (39:1225). */
+  --studio-mono-11:    400 11px/1.4545 var(--studio-font-mono);
+
+  /* Tracking cannot ride in the `font:` shorthand, so the two that have it
+   * carry it separately. Display's is negative, the caps label's is wide. */
+  --studio-tracking-display: -0.00625em;
+  --studio-tracking-heading: -0.004167em;
+  --studio-tracking-caps:    0.0545em;
+
+  /* -------------------------------------------------------------- Spacing --
+   * The file's scale, named by value so a gap here is the gap in Figma. */
+  --studio-space-2:  2px;
+  --studio-space-4:  4px;
+  --studio-space-6:  6px;
+  --studio-space-8:  8px;
+  --studio-space-10: 10px;
+  --studio-space-12: 12px;
+  --studio-space-16: 16px;
+  --studio-space-20: 20px;
+  --studio-space-24: 24px;
+  --studio-space-32: 32px;
+  --studio-space-40: 40px;
+
+  /* --------------------------------------------------------------- Radius --
+   * 3 for controls, 4 for cards and buttons, 100 for pills. */
+  /* The height every small control in a toolbar is drawn at: buttons, split halves, menu
+     triggers. One number, because "the same size as the buttons around it" is a promise that
+     is only kept if they all read it from the same place. */
+  --studio-control-sm:     30px;
+
+  --studio-radius-control: 3px;
+  --studio-radius:         4px;
+  --studio-radius-pill:    100px;
+
+  /* -------------------------------------------------------------- Density --
+   * "Rancher is a dense product. Rows are 11-14px of vertical padding, not 20
+   * - matching it matters more than breathing room." */
+  --studio-row-pad-y: 11px;
+  --studio-row-pad-x: 12px;
+
+  /* --------------------------------------------------------- Panel widths --
+   * The three the file names, and the floors they are allowed down to.
+   *
+   * The widths are what the frames measure at 1440, which is the only viewport the file is
+   * drawn at - they are not minimums. Held as minimums they add up: 340 + 520 on screen 12
+   * left the diff between them 373px at 1440, 229px at 1280 and nothing at all at 1024, so
+   * the one thing the screen is for vanished first. So each rail shrinks past its drawn
+   * width when it has to, down to a floor of its own, and the column between them has a
+   * floor too - the sum of the three is under the ~954px of content a 1024 viewport has, so
+   * a narrow window squeezes every panel rather than dropping one. */
+  --studio-panel-assistant: 520px;
+  --studio-panel-tree:      288px;
+  --studio-panel-rail:      340px;
+
+  --studio-panel-assistant-min: 300px;
+  --studio-panel-tree-min:      200px;
+  --studio-panel-rail-min:      220px;
+  --studio-panel-main-min:      400px;
+
+  /* ------------------------------------------------------------- Elevation --
+   * Not in the file as a variable; these are the two shadows the screens draw
+   * (dropdown, modal) expressed once so they match each other. */
+  --studio-shadow-popover: 0 4px 16px rgba(0, 0, 0, 0.13);
+  --studio-shadow-modal:   0 8px 40px rgba(0, 0, 0, 0.22);
+}
+
+/*
+ * Dark theme. Only the literal tints need restating - everything routed through
+ * a shell variable has already flipped by the time we get here.
+ *
+ * The tints are rebuilt rather than hand-picked: each is its status hue at low
+ * alpha over whatever the panel behind it is, which keeps the same hue
+ * relationship the light values have without assuming a background colour.
+ */
+body.theme-dark {
+  /*
+   * The two surface washes, inverted rather than restated. In light they are steps *down*
+   * from #FFFFFF (3% for subtle, 5% for nav); against a near-black panel the same steps have
+   * to go up, so they are white at the equivalent low alpha over whatever is behind them -
+   * which also keeps them working on the panels that are not --body-bg. The 4/7 split holds
+   * the light theme's ratio, so nav still reads one step further from the surface than
+   * subtle does.
+   */
+  --studio-surface-subtle: rgba(255, 255, 255, 0.04);
+  --studio-surface-nav:    rgba(255, 255, 255, 0.07);
+  /* Down from the surface, not up from it - see the note beside the light value. */
+  --studio-surface-inset:  rgba(0, 0, 0, 0.22);
+  --studio-inset-shadow:   inset 0 1px 3px rgba(0, 0, 0, 0.45);
+  /* And up from it. The top edge catches a little light, the shadow falls below. */
+  --studio-surface-raised: rgba(255, 255, 255, 0.07);
+  --studio-raised-shadow:  0 2px 4px rgba(0, 0, 0, 0.35), 0 1px 0 rgba(255, 255, 255, 0.06) inset;
+
+  --studio-success-bg: rgba(62, 140, 79, 0.18);
+  --studio-info-bg:    rgba(61, 152, 211, 0.18);
+  --studio-warning-bg: rgba(201, 162, 39, 0.18);
+  --studio-error-bg:   rgba(246, 71, 71, 0.16);
+  --studio-neutral-bg: rgba(139, 139, 150, 0.16);
+
+  --studio-diff-added-bg:     rgba(62, 140, 79, 0.20);
+  --studio-diff-added-text:   #7BC98C;
+  --studio-diff-removed-bg:   rgba(246, 71, 71, 0.18);
+  --studio-diff-removed-text: #F08C8C;
+
+  /*
+   * Lift the status hues so they stay legible against a dark panel - all three of them.
+   *
+   * Success used to be left at its light value while the other two were lifted, and the three
+   * verdicts on 13-verify came out in the wrong order of loudness: amber the brightest thing
+   * on the page, red behind it, and "this passed" the muddiest of the three. Relative
+   * luminance says it plainly - #E0BC4A 0.523, #FF6B6B 0.328, #3E8C4F 0.203 - so the lift is
+   * the same move the other two already made, by the same amount the file uses elsewhere
+   * (+13 lightness, +5 saturation in HSL): #3E8C4F is hsl(133 39% 40%), #52BC69 is
+   * hsl(133 44% 53%), luminance 0.388. That puts green between red and amber instead of
+   * under both.
+   *
+   * The ink on it gets better, not worse: --studio-on-status (#0E0E12) is 4.65:1 on #3E8C4F
+   * and 8.03:1 on #52BC69, because lifting the fill under a dark ink only widens the gap.
+   * The other place the token is text rather than fill - a success badge/banner/chip, which
+   * writes --studio-success on --studio-success-bg - gains as much: 2.89:1 before, 5.0:1
+   * now, so the dark success badge is legible for the first time.
+   */
+  --studio-success: #52BC69;
+  --studio-warning: #E0BC4A;
+  --studio-error:   #FF6B6B;
+
+  /*
+   * The empty control, restated for dark (see the light block for the three light values).
+   *
+   * Fill goes up rather than down, the same inversion the two surface washes above make, and
+   * further up than the nav wash it borrows in light: +10% white is 1.37:1 against the panel
+   * where +7% was 1.24:1. The border stops borrowing --studio-border, which is invisible
+   * against that fill, and becomes +26% white - 2.17:1 against the fill, about what Rancher's
+   * own dark --input-border (#627084) gets, which is the same job.
+   *
+   * The label has to move with the fill or the fix trades one problem for another: 12px/600
+   * needs 4.5:1, and --studio-text-secondary (#8F8F9C) is 3.73:1 on the old fill and 3.38:1
+   * on the new one. --studio-text is 10.4:1 on it. An unanswered control reading as ready to
+   * answer is the point, so the labels being as present as the criterion beside them is the
+   * behaviour wanted, not a side effect.
+   */
+  --studio-control-empty:        rgba(255, 255, 255, 0.10);
+  --studio-control-empty-border: rgba(255, 255, 255, 0.26);
+  --studio-control-empty-text:   var(--studio-text);
+
+  /*
+   * The two 050 tints are literals as well, and they are not decoration: they are what marks
+   * the selected row in the file lists and the selected card on the new-extension form. Left
+   * light they put pale blue behind light text, which is the selected row being the one row
+   * you cannot read.
+   */
+  --studio-blue-050:  rgba(61, 152, 211, 0.22);
+  --studio-green-050: rgba(62, 140, 79, 0.22);
+}
+
+/*
+ * Legacy aliases.
+ *
+ * The masthead was written against an earlier, smaller version of this file. These keep it
+ * compiling while it is migrated onto the names above; delete the block once nothing
+ * matches `grep -r 'studio-line\|studio-surface-sunken\|studio-text-muted'`.
+ */
+body {
+  --studio-line:           var(--studio-border);
+  --studio-line-soft:      var(--studio-border-subtle);
+  --studio-surface-sunken: var(--studio-surface-subtle);
+  --studio-text-muted:     var(--studio-text-tertiary);
+  --studio-text-strong:    var(--studio-text-secondary);
+  --studio-accent:         var(--studio-green-500);
+  --studio-accent-text:    var(--studio-green-600);
+  --studio-warn-bg:        var(--studio-warning-bg);
+  --studio-warn-line:      var(--studio-warning);
+  --studio-warn-text:      var(--studio-warning);
+  --studio-info-text:      var(--studio-blue-600);
+  --studio-gap:            var(--studio-space-8);
+  --studio-gap-tight:      6px;
+  --studio-pad-x:          var(--studio-space-16);
+  --studio-pad-y:          var(--studio-space-8);
+  --studio-radius-chip:    var(--studio-radius-control);
+}

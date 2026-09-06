@@ -1,0 +1,117 @@
+# Publish barn as a Rancher extension, to this repository's gh-pages branch.
+#
+# What Rancher consumes is a Helm repository: an index.yaml at the root of the branch, the
+# chart archives under assets/, and the built extension itself under extensions/. Somebody
+# installing barn adds the Pages URL of this repository under Apps -> Repositories, and the
+# extension appears in Extensions like any other.
+#
+# All of that is built by rancher/dashboard's own reusable workflow, pinned by SHA rather than
+# tracked at @master: it is a third party's workflow with write access to this repository's
+# branches, and the tag beside the SHA (creators-pkg-v3.0.12) is the shell major this
+# extension is built against. Bump both together.
+#
+# The heavy lifting inside it is `yarn publish-pkgs`, which is why `charts/` at the root of
+# this repository belongs to it - the closet's chart lives in `deploy/` for that reason.
+#
+# Two things have to be true for a published extension to be reachable, and neither is
+# something a workflow can arrange:
+#
+#   - the gh-pages branch has to exist before the first run. The publish script checks for it
+#     and stops rather than creating it.
+#   - the repository has to be public, or on a plan whose Pages are public. The chart index is
+#     served from Pages and the extension's own files from raw.githubusercontent.com, and
+#     Rancher fetches both without any credential of the person installing it.
+name: Build and Release Extension Charts
+
+on:
+  # A release, which is the normal path: tag the commit `barn-<version>` and publish the
+  # release. The tag has to match the package name and version or the build stops, which is
+  # deliberate - it is what keeps the chart version and package.json from drifting apart.
+  release:
+    types: [released]
+  # And by hand, for the first run and for re-publishing a version that was built wrong.
+  workflow_dispatch:
+  # And on the version changing on main, so that bumping the number is the whole of
+  # publishing. Pushing every commit is not an option: what this publishes is a Helm
+  # repository, a chart version is supposed to be immutable, and republishing 0.5.15 with
+  # different contents inside it is the drift the tagged path exists to prevent. So the
+  # trigger is the file that carries the number, and the job below refuses anyway if that
+  # number is already in the index.
+  push:
+    branches: [main]
+    paths:
+      - 'pkg/agents/package.json'
+
+defaults:
+  run:
+    shell: bash
+    working-directory: ./
+
+jobs:
+  # Is this version already published? The path filter above fires on any edit to
+  # package.json, not only the version, so without this a change to something else in that
+  # file would republish the version already on gh-pages under the same number.
+  #
+  # The index on gh-pages is the authority rather than the tags, because it is what Rancher
+  # actually reads: a version missing from it is unpublished no matter what was tagged.
+  version-check:
+    runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.decide.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: decide
+        run: |
+          version=$(node -p "require('./pkg/agents/package.json').version")
+          git fetch --depth=1 origin gh-pages 2>/dev/null || true
+          if git show origin/gh-pages:index.yaml > /tmp/index.yaml 2>/dev/null; then
+            if grep -qE "^[[:space:]]+version: ${version}$" /tmp/index.yaml; then
+              echo "agents ${version} is already on gh-pages - nothing to publish"
+              echo "publish=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+          echo "agents ${version} is not published yet"
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+
+  build-extension-charts:
+    needs: version-check
+    # A release and a manual run say what they want outright; only the push trigger is
+    # guessing, and it is the one that has to be talked out of republishing.
+    if: github.event_name != 'push' || needs.version-check.outputs.publish == 'true'
+    uses: rancher/dashboard/.github/workflows/build-extension-charts.yml@9bf23dff6650116673346447bcf0b088e0edb27f # creators-pkg-v3.0.12
+    permissions:
+      contents: write
+      pull-requests: write
+    with:
+      target_branch: gh-pages
+      # Empty on a manual run, which builds whatever version package.json currently names.
+      tagged_release: ${{ github.event_name == 'release' && github.ref_name || '' }}
+
+  # Did anything actually get built?
+  #
+  # The publish script does not fail when the build under it does. It ran, webpack reported five
+  # errors, and it published a plugin directory containing package.json and no JavaScript - and
+  # the workflow went green. Rancher then installs that happily: the chart is well formed, the
+  # UIPlugin reaches `cached` and `Ready`, and the extension does nothing at all, because there
+  # is nothing to load.
+  #
+  # So this asks the only question that matters afterwards, of the branch rather than of the
+  # build: is there a bundle on gh-pages for this version.
+  verify-published:
+    needs: build-extension-charts
+    if: always() && needs.build-extension-charts.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: A bundle exists for this version
+        run: |
+          version=$(node -p "require('./pkg/agents/package.json').version")
+          git fetch --depth=1 origin gh-pages
+          files=$(git ls-tree -r --name-only origin/gh-pages "extensions/agents/${version}/plugin" || true)
+          echo "$files"
+          if ! echo "$files" | grep -qE '\.js$'; then
+            echo "::error::published ${version} has no JavaScript - the build failed and the publish swallowed it"
+            exit 1
+          fi
+          echo "ok: $(echo "$files" | grep -cE '\.js$') javascript files published"
