@@ -203,6 +203,7 @@ case "$VERB" in
     # holds the prompts somebody typed into it and would put them in the next pane's up-arrow.
     # Taking it out means a read-modify-write of a file every running pane is also writing, and
     # losing somebody else's trust flags to a race is worse than a stale line of history.
+    echo ok
     ;;
 
   rename)
@@ -214,6 +215,10 @@ case "$VERB" in
     # never parsed by anything. Control characters go because `list` is one line per
     # conversation, and the length is capped because a tab is not a paragraph.
     printf '%s' "$3" | tr -d '\000-\037' | cut -c1-200 > "$SESSIONS/$ID/.title"
+    # Say so. The caller reads this over a websocket the apiserver proxy sometimes closes
+    # before the final status frame arrives, and a command that printed nothing is then
+    # indistinguishable from one that never ran.
+    echo ok
     ;;
 
   *)

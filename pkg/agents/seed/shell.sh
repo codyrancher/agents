@@ -190,19 +190,36 @@ fi
 #                       never exist.
 MODE=${4:-claude}
 
+# The pane's environment, spelled out on the pane itself rather than inherited. A tmux server
+# hands every new session the environment it was started with, which is whichever pane came
+# first; a pane started with the wrong HOME (a relative one, say) would otherwise be inherited
+# by every conversation after it, and claude with an empty HOME is claude asking to be set up.
+PANE_PATH="$HOME_DIR/.local/bin:$PATH"
+PANE_ENV="env HOME=$HOME_DIR PATH=$PANE_PATH TERM=xterm-256color"
+
 if [ "$MODE" = shell ]; then
-  PANE="/bin/bash -l"
+  PANE="$PANE_ENV /bin/bash -l"
 else
   # $2 is where this pane records which conversation is its own, and it is only wanted where
   # panes share a working directory - the agent panel, whose sessions directory is beside the
   # workspace. An extension's terminal has a directory to itself and passes nothing, which
   # leaves claude-session.sh on --continue.
-  MC_CONVERSATION=""
+  # Which claude transcript this pane is. The id file is written by claude-session.sh after the
+  # first run and read on every start after it, so opening a conversation opens *that*
+  # conversation rather than `claude --continue`'s guess, which is the newest transcript in the
+  # working directory - and every conversation of a workspace shares one working directory, its
+  # checkout, so the guess was another conversation, or nothing, more often than not. The agent
+  # pod's shared conversations keep their old place; everywhere else it is beside the home.
   case "$WORKDIR" in
     */conversations) MC_CONVERSATION="$(dirname "$WORKDIR")/sessions/$SESSION.id" ;;
+    *) MC_CONVERSATION="$(dirname "$HOME_DIR")/sessions/$SESSION.id" ;;
   esac
+  mkdir -p "$(dirname "$MC_CONVERSATION")" 2>/dev/null || true
+  if [ "$(id -u)" = 0 ]; then
+    chown node:node "$(dirname "$MC_CONVERSATION")" 2>/dev/null || true
+  fi
 
-  PANE="/bin/bash /seed/claude-session.sh '$MC_QUEUE' '$MC_CONVERSATION'"
+  PANE="$PANE_ENV /bin/bash /seed/claude-session.sh '$MC_QUEUE' '$MC_CONVERSATION'"
 fi
 
 if [ "$MODE" = start ]; then
