@@ -12,17 +12,40 @@ entries:
       catalog.cattle.io/ui-component: plugins
       catalog.cattle.io/ui-extensions-version: '>= 3.0.0 < 4.0.0'
     apiVersion: v2
-    appVersion: 0.1.8
-    created: "2026-09-06T06:10:27.278045833Z"
+    appVersion: 0.1.9
+    created: "2026-09-06T06:26:26.576943117Z"
     description: The terminal, the agent pod and its conversations, offered to every
       extension in this Rancher
-    digest: b31f0147f78cf1e0e3eec5f22a02765bbed89399285c939e888d4514762e5902
+    digest: 8bec95a252ab89f6716d56ea0ec9b6d01350127ba12357567343d95e58949014
     home: https://github.com/codyrancher/agents
     icon: https://codyrancher.github.io/agents/icon.svg
     name: agents
     type: application
     urls:
-    - assets/agents/agents-0.1.8.tgz
+    - assets/agents/agents-0.1.9.tgz
+    version: 0.1.9
+  - annotations:
+      catalog.cattle.io/certified: rancher
+      catalog.cattle.io/display-name: Agents
+      catalog.cattle.io/namespace: cattle-ui-plugin-system
+      catalog.cattle.io/os: linux
+      catalog.cattle.io/permits-os: linux, windows
+      catalog.cattle.io/rancher-version: '>= 2.10.0'
+      catalog.cattle.io/scope: management
+      catalog.cattle.io/ui-component: plugins
+      catalog.cattle.io/ui-extensions-version: '>= 3.0.0 < 4.0.0'
+    apiVersion: v2
+    appVersion: 0.1.8
+    created: "2026-09-06T06:10:50.049434668Z"
+    description: The terminal, the agent pod and its conversations, offered to every
+      extension in this Rancher
+    digest: 3641e2393513b1446973a8ce3552534ca055651de839afa172bb96430c976d85
+    home: https://github.com/codyrancher/agents
+    icon: https://codyrancher.github.io/agents/icon.svg
+    name: agents
+    type: application
+    urls:
+    - https://github.com/codyrancher/agents/releases/download/agents-0.1.8/agents-0.1.8.tgz
     version: 0.1.8
   - annotations:
       catalog.cattle.io/certified: rancher
@@ -208,4 +231,4 @@ entries:
     urls:
     - https://github.com/codyrancher/agents/releases/download/agents-0.1.0/agents-0.1.0.tgz
     version: 0.1.0
-generated: "2026-09-06T06:10:27.276955098Z"
+generated: "2026-09-06T06:26:26.576380108Z"
