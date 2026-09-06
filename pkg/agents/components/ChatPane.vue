@@ -99,6 +99,10 @@ export default {
       atBottom:    true,
       mineIndex:   -1,
       openSummaries: {},
+      // The subagents' last words and when they last wrote, read on every poll; and whether
+      // the list of them is open.
+      tails:       {},
+      showAgents:  false,
     };
   },
 
@@ -147,6 +151,24 @@ export default {
 
     shown() {
       return this.view === 'main' ? this.messages : this.sub.messages;
+    },
+
+    /** The subagents with what each last said, the ones still writing first. */
+    agentRows() {
+      const now = Date.now() / 1000;
+
+      return this.agents.map((a) => {
+        const tail = this.tails[a.id] || {};
+        const working = !!tail.at && now - tail.at < 45;
+
+        return {
+          ...a, working, last: tail.last || '', when: tail.at ? this.when(new Date(tail.at * 1000).toISOString()) : '',
+        };
+      }).sort((x, y) => Number(y.working) - Number(x.working));
+    },
+
+    workingAgents() {
+      return this.agentRows.filter((a) => a.working).length;
     },
 
     rendered() {
@@ -226,6 +248,8 @@ export default {
           'if [ -n "$FILE" ] && [ -f "$FILE" ]; then size=$(wc -c < "$FILE"); echo "@@SIZE $size"; if [ "$size" -gt "$OFF" ]; then echo "@@DATA"; tail -c +$((OFF+1)) "$FILE"; echo; echo "@@ENDDATA"; fi; fi',
           // The subagent's transcript sits beside the session's, in a directory named for it.
           'if [ -n "$SUB" ] && [ -n "$FILE" ]; then SF="${FILE%.jsonl}/subagents/agent-$SUB.jsonl"; if [ -f "$SF" ]; then ssize=$(wc -c < "$SF"); echo "@@SSIZE $ssize"; if [ "$ssize" -gt "$SOFF" ]; then echo "@@SDATA"; tail -c +$((SOFF+1)) "$SF"; echo; echo "@@SENDDATA"; fi; fi; fi',
+          // Every subagent's last line and when it was written, for the list of them.
+          'if [ -n "$FILE" ] && [ -d "${FILE%.jsonl}/subagents" ]; then for f in "${FILE%.jsonl}"/subagents/agent-*.jsonl; do [ -f "$f" ] || continue; id=$(basename "$f" .jsonl); id=${id#agent-}; echo "@@TAIL $id $(stat -c %Y "$f")"; tail -c 6000 "$f" | grep "\"type\":\"assistant\"" | tail -n 1 | cut -c1-3000; done; echo "@@ENDTAILS"; fi',
           'echo "@@PANE"',
           'if tmux has-session -t "mc-$ID" 2>/dev/null; then tmux capture-pane -p -t "mc-$ID" | tail -n 40; else echo "@@NOPANE"; fi',
         ].join('\n'));
@@ -294,6 +318,30 @@ export default {
           offset: ssize, lines, remainder, messages: parseTranscript(lines.concat(remainder.trim() ? [remainder] : [])),
         };
         this.$nextTick(() => this.scrollToEnd());
+      }
+
+      const tailsAt = out.indexOf('@@TAIL ');
+      const tailsEnd = out.indexOf('@@ENDTAILS');
+
+      if (tailsAt >= 0 && tailsEnd > tailsAt) {
+        const tails = {};
+
+        for (const chunk of out.slice(tailsAt, tailsEnd).split('@@TAIL ').slice(1)) {
+          const [head, ...rest] = chunk.split('\n');
+          const [id, at] = head.trim().split(/\s+/);
+          let last = '';
+
+          try {
+            const entry = JSON.parse(rest.join('\n').trim());
+            const blocks = Array.isArray(entry?.message?.content) ? entry.message.content : [];
+            const text = blocks.filter((b) => b.type === 'text').map((b) => b.text).join(' ').trim();
+            const tool = blocks.find((b) => b.type === 'tool_use');
+
+            last = text || (tool ? `${ tool.name }: ${ toolSummary({ id: tool.id, name: tool.name, input: tool.input }) }` : '');
+          } catch { /* a partial line; keep what we had */ }
+          tails[id] = { at: Number(at) || 0, last: (last || this.tails[id]?.last || '').split('\n')[0].slice(0, 140) };
+        }
+        this.tails = tails;
       }
 
       const paneAt = out.indexOf('@@PANE\n');
@@ -711,29 +759,52 @@ export default {
     @drop="onDrop"
     @dragover.prevent
   >
-    <!-- Which conversation: the main one, and each subagent it launched. -->
+    <!--
+      The subagents this conversation launched, behind one button: the ones still writing
+      first, each with the first line of the last thing it said. Picking one shows its whole
+      transcript here in place of the main conversation.
+    -->
     <div
       v-if="agents.length"
-      class="mc-chat__tabs"
+      class="mc-chat__pick"
     >
       <button
         type="button"
-        class="mc-chat__tab"
-        :class="{ 'mc-chat__tab--on': view === 'main' }"
+        class="mc-chat__pick-btn"
+        :class="{ 'mc-chat__pick-btn--open': showAgents }"
+        @click="showAgents = !showAgents"
+      >
+        {{ showAgents ? '▾' : '▸' }} {{ agents.length }} subagent{{ agents.length === 1 ? '' : 's' }}<template v-if="workingAgents"> · {{ workingAgents }} working</template>
+      </button>
+      <span
+        v-if="view !== 'main'"
+        class="mc-chat__pick-current"
+      >showing: {{ (agents.find((a) => a.id === view) || {}).description || view }}</span>
+      <button
+        v-if="view !== 'main'"
+        type="button"
+        class="mc-chat__link"
         @click="show('main')"
       >
-        Main
+        back to main
       </button>
+    </div>
+    <div
+      v-if="agents.length && showAgents"
+      class="mc-chat__agents"
+    >
       <button
-        v-for="a in agents"
+        v-for="a in agentRows"
         :key="a.id"
         type="button"
-        class="mc-chat__tab"
-        :class="{ 'mc-chat__tab--on': view === a.id }"
-        :title="a.id"
-        @click="show(a.id)"
+        class="mc-chat__agent"
+        :class="{ 'mc-chat__agent--on': view === a.id, 'mc-chat__agent--working': a.working }"
+        @click="show(a.id); showAgents = false"
       >
-        {{ a.description }}
+        <span class="mc-chat__agent-dot" />
+        <span class="mc-chat__agent-name">{{ a.description }}</span>
+        <span class="mc-chat__agent-last">{{ a.last || (a.working ? 'working' : 'nothing said yet') }}</span>
+        <span class="mc-chat__agent-when">{{ a.when }}</span>
       </button>
     </div>
     <div
@@ -1381,33 +1452,75 @@ export default {
 }
 
 .mc-chat {
-  &__tabs {
-    flex:        0 0 auto;
-    display:     flex;
-    gap:         4px;
-    padding:     6px 18px 0;
-    overflow-x:  auto;
+  &__pick {
+    flex:          0 0 auto;
+    display:       flex;
+    align-items:   center;
+    gap:           8px;
+    padding:       6px 18px;
     border-bottom: 1px solid var(--border);
-  }
-
-  &__tab {
-    min-height:    0;
-    padding:       4px 10px;
     font-size:     11px;
-    border:        1px solid transparent;
-    border-bottom: 0;
-    border-radius: 6px 6px 0 0;
-    background:    transparent;
     color:         var(--muted);
-    cursor:        pointer;
-    white-space:   nowrap;
-    max-width:     220px;
-    overflow:      hidden;
-    text-overflow: ellipsis;
-
-    &:hover { color: var(--body-text); }
-    &--on { color: var(--link); border-color: var(--border); background: color-mix(in srgb, var(--link) 8%, transparent); }
   }
+
+  &__pick-btn {
+    min-height:    0;
+    height:        24px;
+    padding:       0 10px;
+    font-size:     11px;
+    border-radius: 12px;
+    border:        1px solid var(--border);
+    background:    transparent;
+    color:         var(--body-text);
+    cursor:        pointer;
+
+    &:hover, &--open { border-color: var(--link); color: var(--link); }
+  }
+
+  &__pick-current { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+
+  &__agents {
+    flex:           0 0 auto;
+    max-height:     40%;
+    overflow:       auto;
+    border-bottom:  1px solid var(--border);
+    padding:        4px 10px;
+    display:        flex;
+    flex-direction: column;
+    gap:            2px;
+  }
+
+  &__agent {
+    display:       grid;
+    grid-template-columns: 10px minmax(120px, 220px) 1fr auto;
+    gap:           8px;
+    align-items:   center;
+    min-height:    0;
+    padding:       4px 8px;
+    border:        1px solid transparent;
+    border-radius: 6px;
+    background:    transparent;
+    color:         var(--body-text);
+    text-align:    left;
+    font-size:     12px;
+    cursor:        pointer;
+
+    &:hover { background: color-mix(in srgb, var(--body-text) 5%, transparent); }
+    &--on { border-color: var(--link); }
+  }
+
+  &__agent-dot {
+    width:         8px;
+    height:        8px;
+    border-radius: 50%;
+    background:    var(--muted);
+    opacity:       0.5;
+  }
+  &__agent--working &__agent-dot { background: var(--link); opacity: 1; animation: mc-chat-pulse 1.4s infinite ease-in-out; }
+
+  &__agent-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  &__agent-last { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  &__agent-when { color: var(--muted); font-size: 11px; }
 
   &__nav {
     position:  absolute;
@@ -1447,6 +1560,11 @@ export default {
   }
 
   &__msg--found { box-shadow: 0 0 0 2px var(--link); }
+}
+
+@keyframes mc-chat-pulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(0.6); opacity: 0.5; }
 }
 
 @keyframes mc-chat-bounce {
