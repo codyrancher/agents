@@ -88,6 +88,22 @@ while true; do
 
   transcripts > "$BEFORE"
 
+  # Record which transcript this is as soon as claude has made one, not only when it exits:
+  # a pane that dies with its pod (the usual way one ends) never reaches remember_conversation,
+  # and the next start would open a new conversation instead of picking this one up.
+  if [ -n "$ID_FILE" ] && [ ! -s "$ID_FILE" ]; then
+    (
+      for _ in $(seq 1 150); do
+        sleep 2
+        new=$(comm -13 "$BEFORE" <(transcripts) 2>/dev/null)
+        if [ "$(printf '%s' "$new" | grep -c .)" = "1" ]; then
+          basename "$new" .jsonl > "$ID_FILE"
+          break
+        fi
+      done
+    ) &
+  fi
+
   CONVERSATION=""
   if [ -n "$ID_FILE" ] && [ -s "$ID_FILE" ]; then
     CONVERSATION=$(cat "$ID_FILE")
