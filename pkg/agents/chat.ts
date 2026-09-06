@@ -315,7 +315,9 @@ export function readPane(text: string): PaneState {
   const lines = raw.map(clean);
   const tail = lines.slice(-40);
   const all = tail.join('\n');
-  const busy = /esc to interrupt|Interrupt ·|tokens · esc/i.test(all);
+  // Working: the status line says so, or a spinner line is up that has not said "done".
+  const spinner = tail.filter((l) => /^\s*[✻✽✶✳⏳·]\s*\S/.test(l) && /(ing|ed)\b.*\d+s/.test(l)).pop() || '';
+  const busy = /esc to interrupt|Interrupt ·|tokens · esc|⏳|Thinking…|Working…/i.test(all) || (!!spinner && !/· done|done /.test(spinner));
   const gone = /\[claude exited|\$ $|# $/.test(tail.slice(-3).join('\n')) && !busy;
   const statusMatch = /^\s*[✻✽✶✳·]\s*(\S.*?)(?:\s+·\s+esc to interrupt.*)?$/m.exec(all);
   const status = statusMatch ? statusMatch[1].replace(/\s+/g, ' ').slice(0, 80) : '';
