@@ -12,7 +12,7 @@
 // the pod this component is pointed at, or, when it starts with `kubectl exec`, in another pod
 // that pod reaches - and every read and write here is a short exec along the same path.
 import {
-  parseTranscript, renderMarkdown, renderPlain, linkPaths, readPane, toolSummary, projectKey
+  parseTranscript, renderMarkdown, renderPlain, linkPaths, readPane, toolSummary, projectKey, agentsFrom
 } from '../chat';
 import { podExecOnce, statPodPath, readPodFileBase64 } from '../pod';
 import { agentPod, sessionCommand } from '../agent';
@@ -90,6 +90,15 @@ export default {
       notice:      '',
       noticeTimer: null,
       hydrating:   false,
+      // Which conversation is shown: the main one, or one of the subagents it launched (by
+      // agent id), whose transcript is followed the same way with an offset of its own.
+      view:        'main',
+      sub:         {
+        offset: 0, lines: [], remainder: '', messages: [],
+      },
+      atBottom:    true,
+      mineIndex:   -1,
+      openSummaries: {},
     };
   },
 
@@ -131,10 +140,19 @@ export default {
       return this.argv.slice(0, dash + 1).filter((arg) => arg !== '-t' && arg !== '-i' && arg !== '-it' && arg !== '-ti');
     },
 
+    /** The subagents this conversation launched, for the tabs. */
+    agents() {
+      return agentsFrom(this.messages);
+    },
+
+    shown() {
+      return this.view === 'main' ? this.messages : this.sub.messages;
+    },
+
     rendered() {
-      return this.messages.map((m) => ({
+      return this.shown.map((m) => ({
         ...m,
-        html:      m.role === 'assistant' ? linkPaths(renderMarkdown(m.text)) : renderPlain(m.text),
+        html:      m.role === 'user' ? renderPlain(m.text) : linkPaths(renderMarkdown(m.text)),
         toolRows:  m.tools.map((t) => ({
           ...t, summary: toolSummary(t), summaryHtml: linkPaths(escapeText(toolSummary(t))),
         })),
@@ -197,14 +215,17 @@ export default {
       }
       this.polling = true;
       try {
+        const sub = this.view === 'main' ? '' : this.view;
         const out = await this.run([
-          `ID=${ JSON.stringify(this.paneId) }; OFF=${ this.offset }`,
+          `ID=${ JSON.stringify(this.paneId) }; OFF=${ this.offset }; SUB=${ JSON.stringify(sub) }; SOFF=${ this.sub.offset }`,
           `PROJ="$HOME/.claude/projects/${ projectKey(this.workdir) }"`,
           'uuid=$(cat "$(dirname "$HOME")/sessions/$ID.id" 2>/dev/null)',
           'FILE=""',
           'if [ -n "$uuid" ] && [ -f "$PROJ/$uuid.jsonl" ]; then FILE="$PROJ/$uuid.jsonl"; else FILE=$(ls -t "$PROJ"/*.jsonl 2>/dev/null | head -1); fi',
           'echo "@@FILE $FILE"',
           'if [ -n "$FILE" ] && [ -f "$FILE" ]; then size=$(wc -c < "$FILE"); echo "@@SIZE $size"; if [ "$size" -gt "$OFF" ]; then echo "@@DATA"; tail -c +$((OFF+1)) "$FILE"; echo; echo "@@ENDDATA"; fi; fi',
+          // The subagent's transcript sits beside the session's, in a directory named for it.
+          'if [ -n "$SUB" ] && [ -n "$FILE" ]; then SF="${FILE%.jsonl}/subagents/agent-$SUB.jsonl"; if [ -f "$SF" ]; then ssize=$(wc -c < "$SF"); echo "@@SSIZE $ssize"; if [ "$ssize" -gt "$SOFF" ]; then echo "@@SDATA"; tail -c +$((SOFF+1)) "$SF"; echo; echo "@@SENDDATA"; fi; fi; fi',
           'echo "@@PANE"',
           'if tmux has-session -t "mc-$ID" 2>/dev/null; then tmux capture-pane -p -t "mc-$ID" | tail -n 40; else echo "@@NOPANE"; fi',
         ].join('\n'));
@@ -251,6 +272,26 @@ export default {
         this.$nextTick(() => this.scrollToEnd());
       }
 
+      const sdataAt = out.indexOf('@@SDATA\n');
+      const sdataEnd = out.indexOf('\n@@SENDDATA');
+      const ssize = Number(/@@SSIZE (\d+)/.exec(out)?.[1] || 0);
+
+      if (this.view !== 'main' && ssize && ssize < this.sub.offset) {
+        this.sub = {
+          offset: 0, lines: [], remainder: '', messages: [],
+        };
+      } else if (this.view !== 'main' && sdataAt >= 0 && sdataEnd > sdataAt) {
+        const text = this.sub.remainder + out.slice(sdataAt + 8, sdataEnd);
+        const parts = text.split('\n');
+        const remainder = parts.pop() || '';
+        const lines = this.sub.lines.concat(parts.filter((l) => l.trim()));
+
+        this.sub = {
+          offset: ssize, lines, remainder, messages: parseTranscript(lines.concat(remainder.trim() ? [remainder] : [])),
+        };
+        this.$nextTick(() => this.scrollToEnd());
+      }
+
       const paneAt = out.indexOf('@@PANE\n');
       const paneText = paneAt >= 0 ? out.slice(paneAt + 7) : '';
 
@@ -262,12 +303,57 @@ export default {
       this.$emit('state', this.attached ? 'open' : 'waiting');
     },
 
-    scrollToEnd() {
+    scrollToEnd(force = false) {
       const el = this.$refs.log;
 
-      if (el && el.scrollHeight - el.scrollTop - el.clientHeight < 200) {
+      if (el && (force || this.atBottom)) {
         el.scrollTop = el.scrollHeight;
+        this.atBottom = true;
       }
+    },
+
+    onScroll() {
+      const el = this.$refs.log;
+
+      this.atBottom = !!el && el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+    },
+
+    /** Your own messages, one at a time, in either direction: to find the one you are after. */
+    stepMine(direction) {
+      const mine = [...(this.$refs.log?.querySelectorAll('.mc-chat__msg--user') || [])];
+
+      if (!mine.length) {
+        return;
+      }
+      const next = this.mineIndex < 0 ? (direction > 0 ? 0 : mine.length - 1) : Math.min(mine.length - 1, Math.max(0, this.mineIndex + direction));
+
+      this.mineIndex = next;
+      mine.forEach((el) => el.classList.remove('mc-chat__msg--found'));
+      mine[next].classList.add('mc-chat__msg--found');
+      mine[next].scrollIntoView({ block: 'center', behavior: 'smooth' });
+      this.atBottom = false;
+    },
+
+    /** Main, or one subagent: a different transcript, followed from the start. */
+    show(view) {
+      if (view === this.view) {
+        return;
+      }
+      this.view = view;
+      this.sub = {
+        offset: 0, lines: [], remainder: '', messages: [],
+      };
+      this.mineIndex = -1;
+      this.atBottom = true;
+      this.poll();
+    },
+
+    toggleSummary(key) {
+      this.openSummaries = { ...this.openSummaries, [key]: !this.openSummaries[key] };
+    },
+
+    firstLine(text) {
+      return (text || '').split('\n').find((l) => l.trim()) || '';
     },
 
     /** Keys into the pane: a name tmux knows (Enter, Escape) or a literal string. */
@@ -392,8 +478,9 @@ export default {
         return null;
       }
       if (this.prefix.length) {
-        const ns = this.prefix[this.prefix.indexOf('-n') + 1];
-        const container = this.prefix[this.prefix.indexOf('-c') + 1] || 'workspace';
+        // The last `-n` and `-c`: kubectl's own. The wrapper before it is a `sh -c` of its own.
+        const ns = this.prefix[this.prefix.lastIndexOf('-n') + 1];
+        const container = this.prefix[this.prefix.lastIndexOf('-c') + 1] || 'workspace';
         const k = this.prefix.findIndex((a) => a === 'kubectl');
         const argv = [...this.prefix.slice(0, k + 1), 'get', 'pods', '-n', ns, '-l', `app=${ ns }`, '--field-selector=status.phase=Running', '-o', 'jsonpath={.items[0].metadata.name}'];
         const name = (await podExecOnce(pod, argv, 15000, this.container, this.namespace)).trim();
@@ -618,10 +705,36 @@ export default {
     @drop="onDrop"
     @dragover.prevent
   >
+    <!-- Which conversation: the main one, and each subagent it launched. -->
+    <div
+      v-if="agents.length"
+      class="mc-chat__tabs"
+    >
+      <button
+        type="button"
+        class="mc-chat__tab"
+        :class="{ 'mc-chat__tab--on': view === 'main' }"
+        @click="show('main')"
+      >
+        Main
+      </button>
+      <button
+        v-for="a in agents"
+        :key="a.id"
+        type="button"
+        class="mc-chat__tab"
+        :class="{ 'mc-chat__tab--on': view === a.id }"
+        :title="a.id"
+        @click="show(a.id)"
+      >
+        {{ a.description }}
+      </button>
+    </div>
     <div
       ref="log"
       class="mc-chat__log"
       @click="onLogClick"
+      @scroll.passive="onScroll"
     >
       <p
         v-if="!messages.length && !error"
@@ -638,8 +751,23 @@ export default {
         :class="`mc-chat__msg--${ m.role }`"
       >
         <div class="mc-chat__meta">
-          <span class="mc-chat__who">{{ m.role === 'user' ? 'You' : 'Claude' }}</span>
+          <span class="mc-chat__who">{{ m.role === 'user' ? 'You' : m.role === 'summary' ? 'Summary' : 'Claude' }}</span>
           <span class="mc-chat__when">{{ when(m.at) }}</span>
+          <button
+            v-if="m.role === 'summary'"
+            type="button"
+            class="mc-chat__link"
+            @click="toggleSummary(m.key)"
+          >
+            {{ openSummaries[m.key] ? 'Hide' : 'Show' }}
+          </button>
+        </div>
+        <!-- A compact's summary: the conversation so far, folded. Shown on request. -->
+        <div
+          v-if="m.role === 'summary' && !openSummaries[m.key]"
+          class="mc-chat__body mc-chat__summary-line"
+        >
+          {{ firstLine(m.text) }}
         </div>
         <div
           v-if="m.thinking"
@@ -658,7 +786,7 @@ export default {
           >{{ m.thinking }}</pre>
         </div>
         <div
-          v-if="m.role === 'assistant' && m.html"
+          v-if="(m.role === 'assistant' || (m.role === 'summary' && openSummaries[m.key])) && m.html"
           class="mc-chat__body mc-chat__md"
           v-html="m.html"
         />
@@ -687,6 +815,7 @@ export default {
           <button
             type="button"
             class="mc-chat__disclose"
+            :aria-expanded="openTools[t.id] ? 'true' : 'false'"
             @click="toggleTool(t.id)"
           >
             <span class="mc-chat__tool-name">{{ t.name }}</span>
@@ -726,12 +855,42 @@ export default {
           Stop
         </button>
       </div>
-      <div
-        v-if="notice"
-        class="mc-chat__notice"
+    </div>
+
+    <div
+      v-if="notice"
+      class="mc-chat__notice"
+    >
+      {{ notice }}
+    </div>
+
+    <!-- Getting around: your messages one by one, and the bottom. -->
+    <div class="mc-chat__nav">
+      <button
+        type="button"
+        class="mc-chat__navbtn"
+        title="Your previous message"
+        @click="stepMine(-1)"
       >
-        {{ notice }}
-      </div>
+        &#8593; mine
+      </button>
+      <button
+        type="button"
+        class="mc-chat__navbtn"
+        title="Your next message"
+        @click="stepMine(1)"
+      >
+        &#8595; mine
+      </button>
+      <button
+        v-if="!atBottom"
+        type="button"
+        class="mc-chat__navbtn mc-chat__navbtn--bottom"
+        title="Jump to the bottom"
+        @click="scrollToEnd(true)"
+      >
+        &#8681; bottom
+      </button>
     </div>
 
     <Teleport to="body">
@@ -802,16 +961,7 @@ export default {
     <div class="mc-chat__status">
       <span v-if="error" class="mc-chat__error">{{ error }}</span>
       <template v-else-if="pasting">{{ pasting }}</template>
-      <template v-else-if="working">
-        <i class="icon icon-spinner icon-spin" /> {{ pane.status || 'Working' }}
-        <button
-          type="button"
-          class="mc-chat__link"
-          @click="stop"
-        >
-          Stop
-        </button>
-      </template>
+      <template v-else-if="working" />
       <template v-else-if="!attached">Not running</template>
       <template v-else-if="pane.gone">
         Claude is not running in this pane.
@@ -849,6 +999,7 @@ export default {
 
 <style lang="scss" scoped>
 .mc-chat {
+  position:       relative;
   display:        flex;
   flex-direction: column;
   height:         100%;
@@ -989,40 +1140,54 @@ export default {
     color:       var(--muted);
   }
 
+  // Tool calls: one line each, an accordion. The badge is the tool, the rest is what it did.
   &__tool {
-    margin:       6px 0 0;
-    border-left:  2px solid var(--border);
-    padding-left: 8px;
+    margin:       2px 0 0;
     font-size:    12px;
+    line-height:  1.35;
 
-    &--error { border-left-color: var(--error); }
-    &--pending { border-left-color: var(--link); }
+    &--error .mc-chat__tool-name { background: color-mix(in srgb, var(--error) 22%, transparent); color: var(--error); }
+    &--pending .mc-chat__tool-name { background: color-mix(in srgb, var(--link) 18%, transparent); color: var(--link); }
   }
 
   &__disclose {
     background:  none;
     border:      0;
-    padding:     2px 0;
+    padding:     1px 0;
     min-height:  0;
-    color:       var(--body-text);
+    color:       var(--muted);
     cursor:      pointer;
     text-align:  left;
     font-size:   12px;
     display:     flex;
-    gap:         8px;
+    gap:         6px;
     align-items: baseline;
     max-width:   100%;
+    width:       100%;
 
-    &:hover { color: var(--link); }
+    &::before {
+      content:   '▸';
+      flex:      0 0 auto;
+      font-size: 9px;
+      color:     var(--muted);
+    }
+
+    &:hover { color: var(--body-text); }
   }
+
+  &__tool-detail + &__disclose::before, &__disclose[aria-expanded='true']::before { content: '▾'; }
 
   &__tool-name {
     flex:          0 0 auto;
     font-weight:   600;
-    font-size:     11px;
-    padding:       0 6px;
+    font-size:     10px;
+    line-height:   16px;
+    padding:       0 5px;
     border-radius: 3px;
     background:    color-mix(in srgb, var(--body-text) 8%, transparent);
+    color:         var(--body-text);
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
   }
   &__tool-summary {
     color:         var(--muted);
@@ -1086,12 +1251,17 @@ export default {
   }
 
   &__notice {
-    margin:        0 0 8px;
-    padding:       6px 10px;
-    border-radius: 6px;
-    background:    color-mix(in srgb, var(--warning) 14%, transparent);
-    border:        1px solid color-mix(in srgb, var(--warning) 40%, transparent);
+    position:      absolute;
+    left:          18px;
+    right:         18px;
+    bottom:        118px;
+    z-index:       4;
+    padding:       8px 12px;
+    border-radius: 8px;
+    background:    color-mix(in srgb, var(--warning) 18%, var(--body-bg));
+    border:        1px solid color-mix(in srgb, var(--warning) 50%, transparent);
     font-size:     12px;
+    box-shadow:    0 4px 14px rgba(0, 0, 0, 0.25);
   }
 
   &__dialog {
@@ -1202,6 +1372,75 @@ export default {
 
     &:disabled { opacity: 0.5; cursor: default; }
   }
+}
+
+.mc-chat {
+  &__tabs {
+    flex:        0 0 auto;
+    display:     flex;
+    gap:         4px;
+    padding:     6px 18px 0;
+    overflow-x:  auto;
+    border-bottom: 1px solid var(--border);
+  }
+
+  &__tab {
+    min-height:    0;
+    padding:       4px 10px;
+    font-size:     11px;
+    border:        1px solid transparent;
+    border-bottom: 0;
+    border-radius: 6px 6px 0 0;
+    background:    transparent;
+    color:         var(--muted);
+    cursor:        pointer;
+    white-space:   nowrap;
+    max-width:     220px;
+    overflow:      hidden;
+    text-overflow: ellipsis;
+
+    &:hover { color: var(--body-text); }
+    &--on { color: var(--link); border-color: var(--border); background: color-mix(in srgb, var(--link) 8%, transparent); }
+  }
+
+  &__nav {
+    position:  absolute;
+    right:     26px;
+    bottom:    118px;
+    display:   flex;
+    gap:       4px;
+    z-index:   3;
+  }
+
+  &__navbtn {
+    min-height:    0;
+    height:        24px;
+    padding:       0 8px;
+    font-size:     11px;
+    border-radius: 12px;
+    border:        1px solid var(--border);
+    background:    var(--body-bg);
+    color:         var(--muted);
+    cursor:        pointer;
+    opacity:       0.75;
+
+    &:hover { opacity: 1; color: var(--link); border-color: var(--link); }
+    &--bottom { color: var(--link); opacity: 1; }
+  }
+
+  &__msg--summary {
+    background:   color-mix(in srgb, var(--warning) 8%, transparent);
+    border-color: color-mix(in srgb, var(--warning) 30%, transparent);
+  }
+
+  &__summary-line {
+    color:         var(--muted);
+    white-space:   nowrap;
+    overflow:      hidden;
+    text-overflow: ellipsis;
+  }
+
+  &__msg--found { box-shadow: 0 0 0 2px var(--link); }
 }
 
 @keyframes mc-chat-bounce {

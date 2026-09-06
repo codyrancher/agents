@@ -28,7 +28,7 @@ export interface ChatToolCall {
 export interface ChatMessage {
   /** The transcript's own uuid for the line, for keys. */
   key: string;
-  role: 'user' | 'assistant';
+  role: 'user' | 'assistant' | 'summary';
   /** Text, as written (markdown). */
   text: string;
   /** Tool calls in this assistant turn, results attached as they arrive. */
@@ -91,8 +91,12 @@ export function parseTranscript(lines: string[]): ChatMessage[] {
       if (/^<(local-command-stdout|command-name|command-message)/.test(text)) {
         continue;
       }
+      // A compact's summary arrives as a user line, because that is how it is fed back to the
+      // model. It is not something the person said; it is the conversation so far, folded.
+      const summary = entry.isCompactSummary === true || /^This session is being continued from a previous conversation/.test(text);
+
       messages.push({
-        key: entry.uuid || `${ messages.length }`, role: 'user', text, tools: [], thinking: '', images, at,
+        key: entry.uuid || `${ messages.length }`, role: summary ? 'summary' : 'user', text, tools: [], thinking: '', images, at,
       });
       continue;
     }
@@ -397,7 +401,7 @@ const VIDEO_EXT = /\.(webm|mp4|mov|mkv)$/i;
  * a quote or `=`, so a URL's path and an HTML attribute are left alone; ends before whitespace
  * or markup.
  */
-const PATH_RE = /(^|[^\w"'=/:@.-])((?:~|\/(?:workspace|app|tmp|home|root|etc|var|usr|opt|srv|mnt|data))\/[^\s<>"'`)\]]*[^\s<>"'`)\].,;:!?])/g;
+const PATH_RE = /(^|[^\w"'=/:@.-])((?:~|\/(?:workspace|app|tmp|home|root|etc|var|usr|opt|srv|mnt|data))\/[^\s<>"'`)\]&;]*[^\s<>"'`)\]&;.,:!?])/g;
 
 export function mediaKind(path: string): 'image' | 'video' | '' {
   return IMAGE_EXT.test(path) ? 'image' : VIDEO_EXT.test(path) ? 'video' : '';
@@ -422,4 +426,37 @@ export function linkPaths(html: string): string {
 /** Plain text (a person's message) as HTML: escaped, line breaks kept, paths clickable. */
 export function renderPlain(text: string): string {
   return linkPaths(escapeHtml(text || '').replace(/\n/g, '<br>'));
+}
+
+// ── Subagents: the conversations a conversation started ─────────────────────────────────────
+
+export interface ChatAgent {
+  id: string;
+  description: string;
+}
+
+/**
+ * The subagents this conversation launched, from its Agent tool calls: the tool's own answer
+ * names the agent's id, and the transcript of each is a file of its own beside the session's
+ * (`<session>/subagents/agent-<id>.jsonl`), read the same way as the main one.
+ */
+export function agentsFrom(messages: ChatMessage[]): ChatAgent[] {
+  const out: ChatAgent[] = [];
+
+  for (const m of messages) {
+    for (const t of m.tools) {
+      if (t.name !== 'Agent' && t.name !== 'Task') {
+        continue;
+      }
+      const id = /agentId:\s*([0-9a-f]{8,})/i.exec(t.result || '')?.[1];
+
+      if (id && !out.some((a) => a.id === id)) {
+        const input = (t.input || {}) as Record<string, unknown>;
+
+        out.push({ id, description: String(input.description || input.prompt || id).slice(0, 60) });
+      }
+    }
+  }
+
+  return out;
 }
