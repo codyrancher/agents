@@ -12,17 +12,40 @@ entries:
       catalog.cattle.io/ui-component: plugins
       catalog.cattle.io/ui-extensions-version: '>= 3.0.0 < 4.0.0'
     apiVersion: v2
-    appVersion: 0.1.2
-    created: "2026-09-06T04:59:12.972956267Z"
+    appVersion: 0.1.3
+    created: "2026-09-06T05:07:38.58128312Z"
     description: The terminal, the agent pod and its conversations, offered to every
       extension in this Rancher
-    digest: 6a628f964685fc08774f66ccd757fdcf236f77dced810a34c0dee067470cd041
+    digest: 10078e53b6311401065b65c3f6f33d931c651858f42b6e5227f7a1eb77633c4b
     home: https://github.com/codyrancher/agents
     icon: https://rancher.github.io/ui-internal-tools/ai/magic-closet/logo.svg
     name: agents
     type: application
     urls:
-    - assets/agents/agents-0.1.2.tgz
+    - assets/agents/agents-0.1.3.tgz
+    version: 0.1.3
+  - annotations:
+      catalog.cattle.io/certified: rancher
+      catalog.cattle.io/display-name: Agents
+      catalog.cattle.io/namespace: cattle-ui-plugin-system
+      catalog.cattle.io/os: linux
+      catalog.cattle.io/permits-os: linux, windows
+      catalog.cattle.io/rancher-version: '>= 2.10.0'
+      catalog.cattle.io/scope: management
+      catalog.cattle.io/ui-component: plugins
+      catalog.cattle.io/ui-extensions-version: '>= 3.0.0 < 4.0.0'
+    apiVersion: v2
+    appVersion: 0.1.2
+    created: "2026-09-06T04:59:34.696952207Z"
+    description: The terminal, the agent pod and its conversations, offered to every
+      extension in this Rancher
+    digest: 94817a8343daaf142db1dc71d3cd5a920b56863aec8c5ddea0edb358de2bd558
+    home: https://github.com/codyrancher/agents
+    icon: https://rancher.github.io/ui-internal-tools/ai/magic-closet/logo.svg
+    name: agents
+    type: application
+    urls:
+    - https://github.com/codyrancher/agents/releases/download/agents-0.1.2/agents-0.1.2.tgz
     version: 0.1.2
   - annotations:
       catalog.cattle.io/certified: rancher
@@ -70,4 +93,4 @@ entries:
     urls:
     - https://github.com/codyrancher/agents/releases/download/agents-0.1.0/agents-0.1.0.tgz
     version: 0.1.0
-generated: "2026-09-06T04:59:12.972576445Z"
+generated: "2026-09-06T05:07:38.5804954Z"
