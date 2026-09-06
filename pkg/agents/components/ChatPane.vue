@@ -12,10 +12,20 @@
 // the pod this component is pointed at, or, when it starts with `kubectl exec`, in another pod
 // that pod reaches - and every read and write here is a short exec along the same path.
 import {
-  parseTranscript, renderMarkdown, readPane, toolSummary, projectKey
+  parseTranscript, renderMarkdown, renderPlain, linkPaths, readPane, toolSummary, projectKey
 } from '../chat';
-import { podExecOnce } from '../pod';
+import { podExecOnce, statPodPath, readPodFileBase64 } from '../pod';
 import { agentPod, sessionCommand } from '../agent';
+import PodFileViewer from './PodFileViewer.vue';
+
+const THUMB_MAX = 400_000;
+const MIME = {
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', bmp: 'image/bmp', svg: 'image/svg+xml',
+};
+
+function escapeText(text) {
+  return String(text || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
 
 const POLL_MS = 1500;
 const CHUNK = 3000;
@@ -33,6 +43,8 @@ function b64(text) {
 
 export default {
   name: 'ChatPane',
+
+  components: { PodFileViewer },
 
   props: {
     session:   { type: String, default: 'agent-1' },
@@ -70,6 +82,14 @@ export default {
       openThoughts: {},
       stuck:       false,
       attached:    false,
+      // Paths in the log: thumbnails fetched from the pod (path -> data URL, or 'missing'),
+      // the one open in the viewer, and where the viewer reads from.
+      thumbs:      {},
+      viewerPath:  '',
+      media:       null,
+      notice:      '',
+      noticeTimer: null,
+      hydrating:   false,
     };
   },
 
@@ -114,8 +134,10 @@ export default {
     rendered() {
       return this.messages.map((m) => ({
         ...m,
-        html:      m.role === 'assistant' ? renderMarkdown(m.text) : '',
-        toolRows:  m.tools.map((t) => ({ ...t, summary: toolSummary(t) })),
+        html:      m.role === 'assistant' ? linkPaths(renderMarkdown(m.text)) : renderPlain(m.text),
+        toolRows:  m.tools.map((t) => ({
+          ...t, summary: toolSummary(t), summaryHtml: linkPaths(escapeText(toolSummary(t))),
+        })),
       }));
     },
 
@@ -133,8 +155,13 @@ export default {
     this.timer = setInterval(() => this.poll(), POLL_MS);
   },
 
+  updated() {
+    this.hydrate();
+  },
+
   beforeUnmount() {
     clearInterval(this.timer);
+    clearTimeout(this.noticeTimer);
   },
 
   methods: {
@@ -350,6 +377,137 @@ export default {
       this.openTools = { ...this.openTools, [id]: !this.openTools[id] };
     },
 
+    /**
+     * Where the files a message names live: the pod the pane runs in. For a pane in another
+     * pod (kubectl prefix) that pod is looked up by the label its Deployment gives it; the
+     * viewer and the thumbnails then read it directly, with the same session that reads this one.
+     */
+    async mediaTarget() {
+      if (this.media) {
+        return this.media;
+      }
+      const pod = await this.locatePod();
+
+      if (!pod) {
+        return null;
+      }
+      if (this.prefix.length) {
+        const ns = this.prefix[this.prefix.indexOf('-n') + 1];
+        const container = this.prefix[this.prefix.indexOf('-c') + 1] || 'workspace';
+        const k = this.prefix.findIndex((a) => a === 'kubectl');
+        const argv = [...this.prefix.slice(0, k + 1), 'get', 'pods', '-n', ns, '-l', `app=${ ns }`, '--field-selector=status.phase=Running', '-o', 'jsonpath={.items[0].metadata.name}'];
+        const name = (await podExecOnce(pod, argv, 15000, this.container, this.namespace)).trim();
+
+        if (!name) {
+          return null;
+        }
+        this.media = {
+          pod: name, container, namespace: ns, home: this.paneHome,
+        };
+      } else {
+        this.media = {
+          pod, container: this.container, namespace: this.namespace, home: this.paneHome,
+        };
+      }
+
+      return this.media;
+    },
+
+    /** Thumbnails for every media placeholder the log has not filled in yet, one after another. */
+    async hydrate() {
+      if (this.hydrating || !this.$refs.log) {
+        return;
+      }
+      const pending = [...this.$refs.log.querySelectorAll('.mc-chat__media:not([data-done])')];
+
+      if (!pending.length) {
+        return;
+      }
+      this.hydrating = true;
+      try {
+        for (const el of pending) {
+          const path = el.dataset.path;
+          const kind = el.dataset.kind;
+
+          el.dataset.done = '1';
+          if (kind === 'video') {
+            el.innerHTML = '<span class="mc-chat__chip" title="Open the recording">&#9654;</span>';
+            continue;
+          }
+          const cached = this.thumbs[path];
+
+          if (cached) {
+            this.fill(el, path, cached);
+            continue;
+          }
+          let data = 'missing';
+
+          try {
+            const target = await this.mediaTarget();
+            const stat = target ? await statPodPath(target, path) : { kind: 'none', size: 0 };
+
+            if (stat.kind === 'file' && stat.size > 0 && stat.size <= THUMB_MAX) {
+              const ext = path.split('.').pop().toLowerCase();
+
+              data = `data:${ MIME[ext] || 'image/png' };base64,${ await readPodFileBase64(target, path) }`;
+            } else if (stat.kind === 'file') {
+              data = 'large';
+            }
+          } catch { /* missing it is */ }
+          this.thumbs = { ...this.thumbs, [path]: data };
+          this.fill(el, path, data);
+        }
+      } finally {
+        this.hydrating = false;
+      }
+      if (this.$refs.log?.querySelector('.mc-chat__media:not([data-done])')) {
+        this.hydrate();
+      }
+    },
+
+    fill(el, path, data) {
+      if (data === 'missing') {
+        el.innerHTML = '<span class="mc-chat__chip mc-chat__chip--missing" title="Not in the workspace">&#10005;</span>';
+      } else if (data === 'large') {
+        el.innerHTML = '<span class="mc-chat__chip" title="Open the image">&#128444;</span>';
+      } else {
+        el.innerHTML = `<img class="mc-chat__thumb" src="${ data }" alt="" title="Open ${ escapeText(path) }">`;
+      }
+    },
+
+    /** A click on a path or a thumbnail: the viewer, or a word about a file that is not there. */
+    async onLogClick(event) {
+      const hit = event.target.closest('[data-path]');
+
+      if (!hit) {
+        return;
+      }
+      event.preventDefault();
+      const path = hit.dataset.path;
+
+      try {
+        const target = await this.mediaTarget();
+        const stat = target ? await statPodPath(target, path) : { kind: 'none' };
+
+        if (stat.kind === 'none') {
+          this.flash(`${ path } is not in the workspace (any more).`);
+
+          return;
+        }
+        this.viewerPath = path;
+      } catch (e) {
+        this.flash(e.message || String(e));
+      }
+    },
+
+    flash(text) {
+      this.notice = text;
+      clearTimeout(this.noticeTimer);
+      this.noticeTimer = setTimeout(() => {
+        this.notice = '';
+      }, 5000);
+    },
+
     toggleThought(key) {
       this.openThoughts = { ...this.openThoughts, [key]: !this.openThoughts[key] };
     },
@@ -463,6 +621,7 @@ export default {
     <div
       ref="log"
       class="mc-chat__log"
+      @click="onLogClick"
     >
       <p
         v-if="!messages.length && !error"
@@ -506,7 +665,8 @@ export default {
         <div
           v-else-if="m.role === 'user'"
           class="mc-chat__body mc-chat__user-text"
-        >{{ m.text }}</div>
+          v-html="m.html"
+        />
         <ul
           v-if="m.images.length"
           class="mc-chat__images"
@@ -530,7 +690,10 @@ export default {
             @click="toggleTool(t.id)"
           >
             <span class="mc-chat__tool-name">{{ t.name }}</span>
-            <span class="mc-chat__tool-summary">{{ t.summary }}</span>
+            <span
+              class="mc-chat__tool-summary"
+              v-html="t.summaryHtml"
+            />
             <span
               v-if="t.result === undefined"
               class="mc-chat__tool-state"
@@ -548,7 +711,40 @@ export default {
           </div>
         </div>
       </div>
+      <!-- Working: said where the next message will appear, moving, so it reads as happening. -->
+      <div
+        v-if="working"
+        class="mc-chat__msg mc-chat__msg--assistant mc-chat__working"
+      >
+        <span class="mc-chat__dots"><i /><i /><i /></span>
+        <span class="mc-chat__shimmer">{{ pane.status || 'Working' }}</span>
+        <button
+          type="button"
+          class="mc-chat__link"
+          @click="stop"
+        >
+          Stop
+        </button>
+      </div>
+      <div
+        v-if="notice"
+        class="mc-chat__notice"
+      >
+        {{ notice }}
+      </div>
     </div>
+
+    <Teleport to="body">
+      <PodFileViewer
+        v-if="viewerPath && media"
+        :pod="media.pod"
+        :path="viewerPath"
+        :container="media.container"
+        :namespace="media.namespace"
+        :home="media.home"
+        @close="viewerPath = ''"
+      />
+    </Teleport>
 
     <!-- What the pane is asking, when it is asking something a text box cannot answer. -->
     <div
@@ -661,29 +857,34 @@ export default {
   background:     var(--terminal-bg, var(--body-bg));
   color:          var(--body-text);
   font-size:      13px;
+  line-height:    1.5;
 
   &__log {
     flex:       1 1 auto;
     overflow:   auto;
-    padding:    10px 14px;
+    padding:    14px 18px 8px;
     min-height: 0;
   }
 
   &__empty { color: var(--muted); }
 
   &__msg {
-    margin:        0 0 12px;
-    padding:       8px 12px;
-    border-radius: 8px;
+    position:      relative;
+    margin:        0 0 10px;
+    padding:       10px 14px 10px 16px;
+    border-radius: 10px;
     max-width:     100%;
+    border:        1px solid transparent;
 
     &--user {
-      background:  color-mix(in srgb, var(--link) 14%, transparent);
-      margin-left: 40px;
+      background:   color-mix(in srgb, var(--link) 12%, transparent);
+      border-color: color-mix(in srgb, var(--link) 22%, transparent);
+      margin-left:  36px;
     }
 
     &--assistant {
-      background: color-mix(in srgb, var(--body-text) 5%, transparent);
+      background:   color-mix(in srgb, var(--body-text) 4%, transparent);
+      border-color: color-mix(in srgb, var(--body-text) 9%, transparent);
     }
   }
 
@@ -694,10 +895,17 @@ export default {
     margin:      0 0 4px;
   }
 
-  &__who { font-weight: 600; font-size: 12px; }
+  &__who {
+    font-weight:    600;
+    font-size:      11px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color:          var(--muted);
+  }
+  &__msg--user &__who { color: var(--link); }
   &__when { color: var(--muted); font-size: 11px; }
 
-  &__user-text { white-space: pre-wrap; word-break: break-word; }
+  &__user-text { word-break: break-word; }
 
   &__md {
     word-break: break-word;
@@ -721,20 +929,71 @@ export default {
     :deep(a) { color: var(--link); }
   }
 
+  // A path, wherever it is said: the thing a click opens.
+  :deep(.mc-chat__path) {
+    color:           var(--link);
+    text-decoration: none;
+    font-family:     monospace;
+    font-size:       12px;
+    word-break:      break-all;
+    cursor:          pointer;
+  }
+
+  :deep(.mc-chat__path:hover) { text-decoration: underline; }
+
+  :deep(.mc-chat__media) {
+    display:        inline-flex;
+    align-items:    center;
+    vertical-align: middle;
+    margin:         0 4px 0 0;
+    cursor:         pointer;
+  }
+
+  // The thumbnail is one line tall, so it sits in the sentence rather than breaking it.
+  :deep(.mc-chat__thumb) {
+    height:         1.4em;
+    width:          auto;
+    max-width:      6em;
+    object-fit:     cover;
+    border-radius:  3px;
+    border:         1px solid var(--border);
+    vertical-align: middle;
+    background:     var(--body-bg);
+    transition:     transform 0.12s ease;
+  }
+
+  :deep(.mc-chat__thumb:hover) { transform: scale(1.6); position: relative; z-index: 2; }
+
+  :deep(.mc-chat__chip) {
+    display:         inline-flex;
+    align-items:     center;
+    justify-content: center;
+    height:          1.4em;
+    min-width:       1.6em;
+    padding:         0 4px;
+    border-radius:   3px;
+    border:          1px solid var(--border);
+    background:      var(--body-bg);
+    font-size:       10px;
+    color:           var(--link);
+  }
+
+  :deep(.mc-chat__chip--missing) { color: var(--muted); text-decoration: line-through; }
+
   &__images {
-    list-style: none;
-    padding:    0;
-    margin:     6px 0 0;
+    list-style:  none;
+    padding:     0;
+    margin:      6px 0 0;
     font-family: monospace;
-    font-size:  12px;
-    color:      var(--muted);
+    font-size:   12px;
+    color:       var(--muted);
   }
 
   &__tool {
-    margin:        6px 0 0;
-    border-left:   2px solid var(--border);
-    padding-left:  8px;
-    font-size:     12px;
+    margin:       6px 0 0;
+    border-left:  2px solid var(--border);
+    padding-left: 8px;
+    font-size:    12px;
 
     &--error { border-left-color: var(--error); }
     &--pending { border-left-color: var(--link); }
@@ -757,7 +1016,14 @@ export default {
     &:hover { color: var(--link); }
   }
 
-  &__tool-name { font-weight: 600; flex: 0 0 auto; }
+  &__tool-name {
+    flex:          0 0 auto;
+    font-weight:   600;
+    font-size:     11px;
+    padding:       0 6px;
+    border-radius: 3px;
+    background:    color-mix(in srgb, var(--body-text) 8%, transparent);
+  }
   &__tool-summary {
     color:         var(--muted);
     font-family:   monospace;
@@ -769,29 +1035,72 @@ export default {
   &__tool-state { color: var(--link); }
 
   &__pre {
-    margin:      4px 0 0;
-    padding:     6px 8px;
-    font-size:   11px;
-    background:  var(--body-bg);
-    border:      1px solid var(--border);
+    margin:        4px 0 0;
+    padding:       6px 8px;
+    font-size:     11px;
+    background:    var(--body-bg);
+    border:        1px solid var(--border);
     border-radius: 4px;
-    white-space: pre-wrap;
-    word-break:  break-word;
-    max-height:  320px;
-    overflow:    auto;
+    white-space:   pre-wrap;
+    word-break:    break-word;
+    max-height:    320px;
+    overflow:      auto;
 
     &--result { border-color: color-mix(in srgb, var(--link) 40%, var(--border)); }
   }
 
   &__thought { margin: 0 0 6px; color: var(--muted); }
 
+  // Working: three dots that breathe, and a status that shimmers, like a reply being typed.
+  &__working {
+    display:     flex;
+    align-items: center;
+    gap:         10px;
+    color:       var(--muted);
+  }
+
+  &__dots {
+    display: inline-flex;
+    gap:     4px;
+
+    i {
+      width:         7px;
+      height:        7px;
+      border-radius: 50%;
+      background:    var(--link);
+      opacity:       0.35;
+      animation:     mc-chat-bounce 1.2s infinite ease-in-out;
+
+      &:nth-child(2) { animation-delay: 0.15s; }
+      &:nth-child(3) { animation-delay: 0.3s; }
+    }
+  }
+
+  &__shimmer {
+    background:              linear-gradient(90deg, var(--muted) 0%, var(--body-text) 45%, var(--muted) 90%);
+    background-size:         200% 100%;
+    -webkit-background-clip: text;
+    background-clip:         text;
+    color:                   transparent;
+    animation:               mc-chat-shimmer 2.2s linear infinite;
+  }
+
+  &__notice {
+    margin:        0 0 8px;
+    padding:       6px 10px;
+    border-radius: 6px;
+    background:    color-mix(in srgb, var(--warning) 14%, transparent);
+    border:        1px solid color-mix(in srgb, var(--warning) 40%, transparent);
+    font-size:     12px;
+  }
+
   &__dialog {
-    flex:        0 0 auto;
-    margin:      0 14px 8px;
-    padding:     10px 12px;
-    border:      1px solid var(--link);
-    border-radius: 8px;
-    background:  color-mix(in srgb, var(--link) 8%, transparent);
+    flex:          0 0 auto;
+    margin:        0 18px 8px;
+    padding:       10px 12px;
+    border:        1px solid var(--link);
+    border-radius: 10px;
+    background:    color-mix(in srgb, var(--link) 8%, transparent);
   }
 
   &__dialog-prompt {
@@ -808,14 +1117,14 @@ export default {
   }
 
   &__option {
-    border:        1px solid var(--border);
-    background:    var(--body-bg);
-    color:         var(--body-text);
-    border-radius: 6px;
-    padding:       4px 10px;
-    min-height:    0;
-    font-size:     12px;
-    cursor:        pointer;
+    border:          1px solid var(--border);
+    background:      var(--body-bg);
+    color:           var(--body-text);
+    border-radius:   6px;
+    padding:         4px 10px;
+    min-height:      0;
+    font-size:       12px;
+    cursor:          pointer;
     text-decoration: none;
 
     &:hover { border-color: var(--link); color: var(--link); }
@@ -823,10 +1132,10 @@ export default {
   }
 
   &__option-key {
-    display:       inline-block;
-    min-width:     14px;
-    color:         var(--muted);
-    font-family:   monospace;
+    display:     inline-block;
+    min-width:   14px;
+    color:       var(--muted);
+    font-family: monospace;
   }
 
   &__login { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
@@ -835,7 +1144,7 @@ export default {
 
   &__status {
     flex:        0 0 auto;
-    padding:     4px 14px;
+    padding:     4px 18px;
     font-size:   11px;
     color:       var(--muted);
     display:     flex;
@@ -860,35 +1169,48 @@ export default {
     flex:        0 0 auto;
     display:     flex;
     gap:         8px;
-    padding:     6px 14px 10px;
+    padding:     6px 18px 12px;
     border-top:  1px solid var(--border);
     align-items: flex-end;
   }
 
   &__textarea {
-    flex:       1 1 auto;
-    resize:     vertical;
-    min-height: 44px;
-    font-size:  13px;
-    padding:    6px 8px;
-    background: var(--body-bg);
-    color:      var(--body-text);
-    border:     1px solid var(--border);
-    border-radius: 6px;
+    flex:          1 1 auto;
+    resize:        vertical;
+    min-height:    44px;
+    font-size:     13px;
+    padding:       8px 10px;
+    background:    var(--body-bg);
+    color:         var(--body-text);
+    border:        1px solid var(--border);
+    border-radius: 8px;
+
+    &:focus { border-color: var(--link); outline: none; }
   }
 
   &__send {
     flex:          0 0 auto;
     min-height:    0;
-    height:        32px;
-    padding:       0 14px;
-    border-radius: 6px;
+    height:        34px;
+    padding:       0 16px;
+    border-radius: 8px;
     border:        1px solid var(--link);
     background:    var(--link);
     color:         var(--body-bg);
+    font-weight:   600;
     cursor:        pointer;
 
     &:disabled { opacity: 0.5; cursor: default; }
   }
+}
+
+@keyframes mc-chat-bounce {
+  0%, 80%, 100% { transform: translateY(0); opacity: 0.35; }
+  40% { transform: translateY(-4px); opacity: 1; }
+}
+
+@keyframes mc-chat-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
 }
 </style>

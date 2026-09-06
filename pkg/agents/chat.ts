@@ -387,3 +387,39 @@ export function readPane(text: string): PaneState {
 export function projectKey(cwd: string): string {
   return cwd.replace(/[/.]/g, '-');
 }
+
+// ── Paths in what was said, as things to open ───────────────────────────────────────────────
+
+const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp|svg)$/i;
+const VIDEO_EXT = /\.(webm|mp4|mov|mkv)$/i;
+/**
+ * An absolute path under one of the roots a pane works in. Not preceded by a word character,
+ * a quote or `=`, so a URL's path and an HTML attribute are left alone; ends before whitespace
+ * or markup.
+ */
+const PATH_RE = /(^|[^\w"'=/:@.-])((?:~|\/(?:workspace|app|tmp|home|root|etc|var|usr|opt|srv|mnt|data))\/[^\s<>"'`)\]]*[^\s<>"'`)\].,;:!?])/g;
+
+export function mediaKind(path: string): 'image' | 'video' | '' {
+  return IMAGE_EXT.test(path) ? 'image' : VIDEO_EXT.test(path) ? 'video' : '';
+}
+
+/**
+ * Wrap every path in rendered HTML as something to click: a link for a file or directory,
+ * and for an image or a recording a thumbnail placeholder as well (ChatPane fills it in from
+ * the pod). Runs over HTML this module produced, so tags are its own and never contain a path
+ * in an attribute other than the ones it writes.
+ */
+export function linkPaths(html: string): string {
+  return html.replace(PATH_RE, (whole, before, path) => {
+    const kind = mediaKind(path);
+    const attr = escapeHtml(path);
+    const thumb = kind ? `<span class="mc-chat__media" data-path="${ attr }" data-kind="${ kind }"></span>` : '';
+
+    return `${ before }${ thumb }<a class="mc-chat__path" data-path="${ attr }" title="Open ${ attr }">${ escapeHtml(path) }</a>`;
+  });
+}
+
+/** Plain text (a person's message) as HTML: escaped, line breaks kept, paths clickable. */
+export function renderPlain(text: string): string {
+  return linkPaths(escapeHtml(text || '').replace(/\n/g, '<br>'));
+}
