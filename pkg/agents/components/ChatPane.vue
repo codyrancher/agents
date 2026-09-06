@@ -267,9 +267,13 @@ export default {
 
         this.remainder = parts.pop() || '';
         this.lines.push(...parts.filter((l) => l.trim()));
+        const first = !this.messages.length;
+
         this.offset = size;
         this.messages = parseTranscript(this.lines.concat(this.remainder.trim() ? [this.remainder] : []));
-        this.$nextTick(() => this.scrollToEnd());
+        // The first load lands at the bottom, where the conversation is; after that, only
+        // while the person is already there, so reading back is not interrupted.
+        this.$nextTick(() => this.scrollToEnd(first));
       }
 
       const sdataAt = out.indexOf('@@SDATA\n');
@@ -547,6 +551,8 @@ export default {
       } finally {
         this.hydrating = false;
       }
+      // Thumbnails change the height; stay at the bottom if that is where the person was.
+      this.scrollToEnd();
       if (this.$refs.log?.querySelector('.mc-chat__media:not([data-done])')) {
         this.hydrate();
       }
