@@ -24,6 +24,18 @@ import Socket, {
 } from '@shell/utils/socket';
 import { execUrl, writeImageToPod, EXT_NS, AGENT_CONTAINER } from '../pod';
 import { agentPod, sessionCommand } from '../agent';
+import ChatPane from './ChatPane.vue';
+
+/** Which face of a pane somebody last chose, per conversation. */
+const VIEW_KEY = (session) => `agents.view.${ session }`;
+
+function rememberedView(session) {
+  try {
+    return localStorage.getItem(VIEW_KEY(session)) === 'chat' ? 'chat' : 'terminal';
+  } catch {
+    return 'terminal';
+  }
+}
 import PodFileViewer from './PodFileViewer';
 
 // The dashboard's own build pulls this in globally; an extension's does not, so
@@ -144,7 +156,7 @@ function ctrlByteFor(key) {
 export default {
   name: 'PodTerminal',
 
-  components: { PodFileViewer },
+  components: { PodFileViewer, ChatPane },
 
   props: {
     // Which conversation to attach to, when it is one of the agent pod's. One pane, one
@@ -257,6 +269,8 @@ export default {
       showKeyBar:   false,
       ctrlArmed:    false,
       dprTimer:     null,
+      // The terminal, or the chat drawn over the same session. See ChatPane.
+      view:         rememberedView(this.session),
     };
   },
 
@@ -332,6 +346,20 @@ export default {
   },
 
   methods: {
+    /** Terminal or chat: two faces of one tmux session; the choice is kept per conversation. */
+    setView(view) {
+      this.view = view;
+      try {
+        localStorage.setItem(VIEW_KEY(this.session), view);
+      } catch { /* a browser without storage forgets, which is fine */ }
+      if (view === 'terminal') {
+        this.$nextTick(() => {
+          this.scheduleFit?.();
+          this.terminal?.focus?.();
+        });
+      }
+    },
+
     /**
      * Type something at the prompt on the user's behalf, then put them back
      * where they were: focused, and at the bottom of the scrollback.
@@ -1070,8 +1098,49 @@ export default {
 </script>
 
 <template>
-  <div class="mc-terminal">
+  <div
+    class="mc-terminal"
+    :class="{ 'mc-terminal--chat': view === 'chat' }"
+  >
+    <!--
+      Terminal or chat, on hover at the top right. Both are the same tmux session: the chat
+      reads the transcript claude writes and the pane's own prompts, and types into the pane.
+    -->
+    <div class="mc-terminal__tools">
+      <button
+        type="button"
+        class="mc-terminal__tool"
+        :class="{ 'mc-terminal__tool--on': view === 'terminal' }"
+        title="Terminal"
+        @click="setView('terminal')"
+      >
+        &gt;_
+      </button>
+      <button
+        type="button"
+        class="mc-terminal__tool"
+        :class="{ 'mc-terminal__tool--on': view === 'chat' }"
+        title="Chat"
+        @click="setView('chat')"
+      >
+        &#9776; Chat
+      </button>
+    </div>
+    <ChatPane
+      v-if="view === 'chat'"
+      class="mc-terminal__chat"
+      :session="session"
+      :mode="mode"
+      :command="command"
+      :find-pod="findPod"
+      :namespace="namespace"
+      :container="container"
+      :image-dir="imageDir"
+      :home="home"
+      :label="label"
+    />
     <div
+      v-show="view === 'terminal'"
       ref="xterm"
       class="mc-terminal__xterm"
     />
@@ -1198,6 +1267,46 @@ export default {
   min-width: 0;
   padding: 4px 0 0 6px;
   background: var(--terminal-bg, var(--body-bg));
+
+  &--chat { padding: 0; }
+
+  &__chat {
+    flex:       1 1 auto;
+    min-height: 0;
+  }
+
+  &__tools {
+    position:   absolute;
+    top:        4px;
+    right:      14px;
+    z-index:    6;
+    display:    flex;
+    gap:        4px;
+    opacity:    0;
+    transition: opacity 0.15s ease;
+    pointer-events: none;
+  }
+
+  &:hover &__tools, &__tools:focus-within {
+    opacity:        1;
+    pointer-events: auto;
+  }
+
+  &__tool {
+    min-height:    0;
+    height:        22px;
+    padding:       0 8px;
+    font-size:     11px;
+    font-family:   monospace;
+    border-radius: 4px;
+    border:        1px solid var(--border);
+    background:    var(--body-bg);
+    color:         var(--muted);
+    cursor:        pointer;
+
+    &:hover { color: var(--link); border-color: var(--link); }
+    &--on { color: var(--link); border-color: var(--link); }
+  }
 
   &__paste {
     position:      absolute;

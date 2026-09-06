@@ -1,0 +1,387 @@
+// The chat view of a conversation: what it reads, and how it reads it.
+//
+// A pane is claude's own terminal UI inside tmux, and the chat view is another face on the
+// same session rather than a second client of anything. Two things feed it, both read out of
+// the pod the pane runs in:
+//
+//   - the transcript claude writes as it goes (`~/.claude/projects/<cwd>/<uuid>.jsonl`), one
+//     JSON object per line, which is what the messages, the tool calls and their results are
+//     rendered from. It is the same file `--resume` reads, so what the chat shows is what the
+//     conversation is.
+//   - the last lines of the pane itself (`tmux capture-pane`), which is where the things the
+//     transcript never carries show up: a question with numbered answers, a permission
+//     prompt, the login flow, "session expired", a survey. The chat turns those into buttons
+//     and inputs; what it sends back is keystrokes to the same pane.
+//
+// Everything here is pure: given text, it answers with structure. ChatPane.vue does the
+// fetching and the sending.
+
+export interface ChatToolCall {
+  id: string;
+  name: string;
+  input: unknown;
+  /** The tool's answer, once it has one. */
+  result?: string;
+  resultIsError?: boolean;
+}
+
+export interface ChatMessage {
+  /** The transcript's own uuid for the line, for keys. */
+  key: string;
+  role: 'user' | 'assistant';
+  /** Text, as written (markdown). */
+  text: string;
+  /** Tool calls in this assistant turn, results attached as they arrive. */
+  tools: ChatToolCall[];
+  /** The model's thinking, when the transcript carries it. */
+  thinking: string;
+  /** Files a user message attached (the paths claude was handed). */
+  images: string[];
+  at: string;
+}
+
+/**
+ * Transcript lines to messages.
+ *
+ * The transcript interleaves user turns, assistant turns and tool results (which arrive as a
+ * `user` line whose content is `tool_result` blocks). Tool results are folded into the call
+ * they answer, so a turn reads as: what was said, what was done, what came back.
+ */
+export function parseTranscript(lines: string[]): ChatMessage[] {
+  const messages: ChatMessage[] = [];
+  const calls = new Map<string, ChatToolCall>();
+
+  for (const line of lines) {
+    let entry: any; // eslint-disable-line @typescript-eslint/no-explicit-any
+
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue;
+    }
+
+    if (!entry || (entry.type !== 'user' && entry.type !== 'assistant') || !entry.message) {
+      continue;
+    }
+
+    const content = entry.message.content;
+    const blocks: any[] = typeof content === 'string' ? [{ type: 'text', text: content }] : (Array.isArray(content) ? content : []); // eslint-disable-line @typescript-eslint/no-explicit-any
+    const at = entry.timestamp || '';
+
+    if (entry.type === 'user') {
+      const results = blocks.filter((b) => b.type === 'tool_result');
+
+      for (const result of results) {
+        const call = calls.get(result.tool_use_id);
+
+        if (call) {
+          call.result = resultText(result.content);
+          call.resultIsError = !!result.is_error;
+        }
+      }
+
+      const text = blocks.filter((b) => b.type === 'text').map((b) => String(b.text || '')).join('\n').trim();
+      const images = blocks.filter((b) => b.type === 'image').map((b, i) => b.source?.path || `image ${ i + 1 }`);
+
+      // A user line that is only tool results is not something the person said.
+      if (!text && !images.length) {
+        continue;
+      }
+      // Claude Code writes the pane's own furniture into some user lines; keep it out.
+      if (/^<(local-command-stdout|command-name|command-message)/.test(text)) {
+        continue;
+      }
+      messages.push({
+        key: entry.uuid || `${ messages.length }`, role: 'user', text, tools: [], thinking: '', images, at,
+      });
+      continue;
+    }
+
+    const message: ChatMessage = {
+      key:      entry.uuid || `${ messages.length }`,
+      role:     'assistant',
+      text:     blocks.filter((b) => b.type === 'text').map((b) => String(b.text || '')).join('\n').trim(),
+      tools:    [],
+      thinking: blocks.filter((b) => b.type === 'thinking').map((b) => String(b.thinking || '')).join('\n').trim(),
+      images:   [],
+      at,
+    };
+
+    for (const block of blocks.filter((b) => b.type === 'tool_use')) {
+      const call: ChatToolCall = { id: block.id, name: block.name, input: block.input };
+
+      calls.set(block.id, call);
+      message.tools.push(call);
+    }
+
+    // An assistant line with nothing in it (a stop with no text) adds nothing to read.
+    if (message.text || message.tools.length || message.thinking) {
+      // Consecutive assistant lines are one turn (claude writes a line per content block).
+      const last = messages[messages.length - 1];
+
+      if (last && last.role === 'assistant' && last.at && at && sameTurn(last, message)) {
+        last.text = [last.text, message.text].filter(Boolean).join('\n\n');
+        last.tools.push(...message.tools);
+        last.thinking = [last.thinking, message.thinking].filter(Boolean).join('\n\n');
+      } else {
+        messages.push(message);
+      }
+    }
+  }
+
+  return messages;
+}
+
+function sameTurn(a: ChatMessage, b: ChatMessage): boolean {
+  // Within a few seconds of each other and no user turn between: the same response.
+  return Math.abs(Date.parse(b.at) - Date.parse(a.at)) < 90_000;
+}
+
+function resultText(content: unknown): string {
+  if (typeof content === 'string') {
+    return content;
+  }
+  if (Array.isArray(content)) {
+    return content.map((c) => (c?.type === 'text' ? String(c.text || '') : c?.type === 'image' ? '[image]' : '')).join('\n');
+  }
+
+  return content == null ? '' : JSON.stringify(content);
+}
+
+/** One line that says what a tool call did, for the collapsed row. */
+export function toolSummary(call: ChatToolCall): string {
+  const input = (call.input || {}) as Record<string, unknown>;
+
+  switch (call.name) {
+  case 'Bash': return String(input.description || input.command || '').slice(0, 140);
+  case 'Read': return String(input.file_path || '');
+  case 'Edit': case 'Write': case 'MultiEdit': return String(input.file_path || '');
+  case 'Grep': return `${ input.pattern || '' }${ input.path ? ` in ${ input.path }` : '' }`;
+  case 'Glob': return String(input.pattern || '');
+  case 'Agent': case 'Task': return String(input.description || input.prompt || '').slice(0, 140);
+  case 'Skill': return String(input.skill || '');
+  case 'AskUserQuestion': return 'asked a question';
+  case 'TodoWrite': return 'updated the plan';
+  default: {
+    const first = Object.values(input).find((v) => typeof v === 'string');
+
+    return String(first || '').slice(0, 140);
+  }
+  }
+}
+
+// ── Markdown, enough of it ──────────────────────────────────────────────────────────────────
+
+function escapeHtml(text: string): string {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function inline(text: string): string {
+  let out = escapeHtml(text);
+
+  out = out.replace(/`([^`]+)`/g, (m, code) => `<code>${ code }</code>`);
+  out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  out = out.replace(/(^|[\s(])\*([^*\s][^*]*)\*(?=[\s).,;:!?]|$)/g, '$1<em>$2</em>');
+  out = out.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+  out = out.replace(/(^|[\s(])(https?:\/\/[^\s<)]+)/g, '$1<a href="$2" target="_blank" rel="noopener noreferrer">$2</a>');
+
+  return out;
+}
+
+/**
+ * Markdown to HTML: paragraphs, headings, fenced code, lists, blockquotes, inline code, bold,
+ * italics and links. What claude writes in a reply; anything else stays as text.
+ */
+export function renderMarkdown(text: string): string {
+  const lines = (text || '').replace(/\r/g, '').split('\n');
+  const out: string[] = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+    const fence = /^\s*```(\w*)/.exec(line);
+
+    if (fence) {
+      const code: string[] = [];
+
+      i++;
+      while (i < lines.length && !/^\s*```/.test(lines[i])) {
+        code.push(lines[i++]);
+      }
+      i++;
+      out.push(`<pre><code${ fence[1] ? ` class="lang-${ escapeHtml(fence[1]) }"` : '' }>${ escapeHtml(code.join('\n')) }</code></pre>`);
+      continue;
+    }
+
+    const heading = /^(#{1,6})\s+(.*)$/.exec(line);
+
+    if (heading) {
+      const level = Math.min(6, heading[1].length + 2);
+
+      out.push(`<h${ level }>${ inline(heading[2]) }</h${ level }>`);
+      i++;
+      continue;
+    }
+
+    if (/^\s*([-*+]|\d+\.)\s+/.test(line)) {
+      const ordered = /^\s*\d+\./.test(line);
+      const items: string[] = [];
+
+      while (i < lines.length && /^\s*([-*+]|\d+\.)\s+/.test(lines[i])) {
+        let item = lines[i].replace(/^\s*([-*+]|\d+\.)\s+/, '');
+
+        i++;
+        // Continuation lines, indented.
+        while (i < lines.length && /^\s{2,}\S/.test(lines[i]) && !/^\s*([-*+]|\d+\.)\s+/.test(lines[i])) {
+          item += ` ${ lines[i++].trim() }`;
+        }
+        items.push(`<li>${ inline(item) }</li>`);
+      }
+      out.push(`<${ ordered ? 'ol' : 'ul' }>${ items.join('') }</${ ordered ? 'ol' : 'ul' }>`);
+      continue;
+    }
+
+    if (/^\s*>\s?/.test(line)) {
+      const quote: string[] = [];
+
+      while (i < lines.length && /^\s*>\s?/.test(lines[i])) {
+        quote.push(lines[i++].replace(/^\s*>\s?/, ''));
+      }
+      out.push(`<blockquote>${ renderMarkdown(quote.join('\n')) }</blockquote>`);
+      continue;
+    }
+
+    if (!line.trim()) {
+      i++;
+      continue;
+    }
+
+    const para: string[] = [];
+
+    while (i < lines.length && lines[i].trim() && !/^\s*```/.test(lines[i]) && !/^(#{1,6})\s+/.test(lines[i]) && !/^\s*([-*+]|\d+\.)\s+/.test(lines[i]) && !/^\s*>\s?/.test(lines[i])) {
+      para.push(lines[i++]);
+    }
+    out.push(`<p>${ inline(para.join('\n')).replace(/\n/g, '<br>') }</p>`);
+  }
+
+  return out.join('\n');
+}
+
+// ── What the pane is asking, read off its last lines ────────────────────────────────────────
+
+export interface PaneOption {
+  key: string;
+  label: string;
+  selected: boolean;
+}
+
+export interface PaneDialog {
+  kind: 'options' | 'yes-no' | 'login' | 'code' | 'text';
+  /** The lines above the choices: the question. */
+  prompt: string;
+  options: PaneOption[];
+  /** The login URL, when the pane is showing one. */
+  url: string;
+}
+
+export interface PaneState {
+  /** claude is working (its status line says "esc to interrupt"). */
+  busy: boolean;
+  /** The prompt is up and empty: claude is waiting to be told something. */
+  idle: boolean;
+  /** Something is being asked that is not a free-text prompt. */
+  dialog: PaneDialog | null;
+  /** Claude exited to a shell, or has not started. */
+  gone: boolean;
+  /** The status line's own words, when it has some ("Brewing for 12s"). */
+  status: string;
+}
+
+const FURNITURE = /^[\s─╌═┃│┌┐└┘╭╮╰╯▔▁]+$/;
+
+function clean(line: string): string {
+  return line.replace(/[│┃]/g, ' ').replace(/\s+$/, '');
+}
+
+/**
+ * The pane's state from its last lines.
+ *
+ * Claude Code's UI is regular enough to read: a numbered list with `❯` on the current choice
+ * is a question; `(y/n)` is a confirmation; an oauth URL is a login; "esc to interrupt" means
+ * it is working; a bare `❯` on the input row means it is listening.
+ */
+export function readPane(text: string): PaneState {
+  const raw = text.replace(/\r/g, '').split('\n');
+  const lines = raw.map(clean);
+  const tail = lines.slice(-40);
+  const all = tail.join('\n');
+  const busy = /esc to interrupt|Interrupt ·|tokens · esc/i.test(all);
+  const gone = /\[claude exited|\$ $|# $/.test(tail.slice(-3).join('\n')) && !busy;
+  const statusMatch = /^\s*[✻✽✶✳·]\s*(\S.*?)(?:\s+·\s+esc to interrupt.*)?$/m.exec(all);
+  const status = statusMatch ? statusMatch[1].replace(/\s+/g, ' ').slice(0, 80) : '';
+
+  // A login flow: the URL is what matters, and whether a code is being asked for.
+  const url = /(https:\/\/(?:claude\.com|claude\.ai|console\.anthropic\.com)\/[^\s]*oauth[^\s]*)/i.exec(all.replace(/\n(?=\S)/g, ''))?.[1] || '';
+
+  if (url || /Paste code here/i.test(all)) {
+    return {
+      busy: false, idle: false, gone: false, status, dialog: {
+        kind: /Paste code here/i.test(all) ? 'code' : 'login', prompt: 'Claude needs you to sign in.', options: [], url,
+      },
+    };
+  }
+
+  // Numbered choices, consecutive, the current one marked with ❯.
+  const options: PaneOption[] = [];
+  let start = -1;
+
+  for (let i = 0; i < tail.length; i++) {
+    const m = /^\s*(❯|›|>)?\s*(\d{1,2})\.\s+(\S.*)$/.exec(tail[i]);
+
+    if (m) {
+      if (start < 0 || options.length === 0) {
+        start = i;
+        options.length = 0;
+      }
+      options.push({ key: m[2], label: m[3].replace(/\s{2,}.*$/, '').trim(), selected: !!m[1] });
+    } else if (options.length && tail[i].trim() && !FURNITURE.test(tail[i]) && !/^\s+\S/.test(tail[i])) {
+      // A non-empty, non-indented line after the list ends it - unless it is the input row.
+      if (/^\s*❯\s*$/.test(tail[i]) || /shift\+tab|esc to|for shortcuts/i.test(tail[i])) {
+        break;
+      }
+      start = -1;
+      options.length = 0;
+    }
+  }
+
+  if (options.length >= 2 && start >= 0) {
+    const prompt = tail.slice(Math.max(0, start - 6), start).filter((l) => l.trim() && !FURNITURE.test(l)).join('\n').trim();
+
+    return {
+      busy: false, idle: false, gone: false, status, dialog: {
+        kind: 'options', prompt, options, url: '',
+      },
+    };
+  }
+
+  if (/\((y\/n|Y\/n|y\/N)\)|\[y\/n\]|\[Y\/n\]/i.test(tail.slice(-6).join('\n'))) {
+    const prompt = tail.slice(-6).filter((l) => l.trim() && !FURNITURE.test(l)).join('\n').trim();
+
+    return {
+      busy: false, idle: false, gone: false, status, dialog: {
+        kind: 'yes-no', prompt, options: [{ key: 'y', label: 'Yes', selected: false }, { key: 'n', label: 'No', selected: false }], url: '',
+      },
+    };
+  }
+
+  const idle = !busy && /^\s*[❯>]\s*$/m.test(tail.slice(-8).join('\n'));
+
+  return {
+    busy, idle, gone, status, dialog: null,
+  };
+}
+
+/** Claude Code's project directory name for a working directory: `/workspace/dashboard` is `-workspace-dashboard`. */
+export function projectKey(cwd: string): string {
+  return cwd.replace(/[/.]/g, '-');
+}
