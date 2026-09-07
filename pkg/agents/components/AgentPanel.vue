@@ -563,10 +563,26 @@ export default {
 
       try {
         await renameAgentSession(pending.id, title);
-        this.sessions = await agentSessions();
+        this.sessions = this.withRename(await agentSessions(), pending.id, title);
       } catch (e) {
         this.error = e?.message || String(e);
       }
+    },
+
+    /**
+     * The re-read, with the name we just wrote kept.
+     *
+     * The rename lands in the pod as a file operation and `agentSessions()` lists that
+     * directory, and the two are not ordered: the listing that follows a successful rename can
+     * still be the one from before it. Taking that answer literally put the old name back on
+     * the tab for a poll or two before the next read agreed - the flicker.
+     *
+     * `renameAgentSession` having resolved is the stronger fact of the two, so it wins over a
+     * listing that disagrees with it. A listing that agrees is unchanged by this, and a rename
+     * that actually failed threw before ever reaching here.
+     */
+    withRename(sessions, id, title) {
+      return sessions.map((session) => (session.id === id ? { ...session, title } : session));
     },
 
     // -----------------------------------------------------------------------
