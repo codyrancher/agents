@@ -2463,12 +2463,12 @@ export default {
     text-transform: uppercase;
   }
 
-  // The caret keys sit in the nav row and are square where the others are words.
+  // Square, at the row's own height: an arrow is a glyph, not a word, and giving it a word's
+  // padding is what made it an oval.
   &__navbtn--caret {
-    width:           26px;
-    padding:         0;
-    justify-content: center;
-    text-align:      center;
+    width:      var(--mc-chat-nav, 26px);
+    padding:    0;
+    font-size:  13px;
   }
 
   &__takeover {
@@ -2748,36 +2748,58 @@ export default {
    * move the log stay on the right where they were. Bunched together on the right they read as
    * one group of four, which they are not: two act on the box and two act on the log.
    */
+  /*
+   * A row of its own, between the log and the prompt box.
+   *
+   * It used to float over the log at a fixed offset from the bottom, which meant it sat on
+   * whatever line of the conversation happened to be there - a message with buttons through
+   * it, and text under a control that could not be read or clicked. Being absolute also meant
+   * that offset was a guess about the height of everything below it, and every change to the
+   * composer made the guess wrong again.
+   *
+   * In the column it takes the room it needs and nothing is underneath it.
+   */
   &__nav {
-    position:        absolute;
-    left:            26px;
-    right:           26px;
-    bottom:          118px;
+    flex:            0 0 auto;
     display:         flex;
     justify-content: flex-end;
-    gap:             4px;
-    z-index:         3;
-    // The row is only the buttons: without this it is a full-width strip over the log, and
-    // every click meant for a message lands on it instead.
-    pointer-events:  none;
-
-    > * { pointer-events: auto; }
+    align-items:     center;
+    // Enough to read as two pairs rather than four buttons, and the same step the prompt box's
+    // own controls use.
+    gap:             5px;
+    padding:         2px 18px 0;
   }
 
   // Everything after the caret keys goes to the right; they stay at the left.
   &__navbtn--caret + :not(&__navbtn--caret) { margin-left: auto; }
 
+  /*
+   * The controls that float over the log.
+   *
+   * They were 24px pills with a 12px radius - fully round ends - which made the two arrows
+   * into wide ovals beside two word-shaped ones, four different silhouettes in a row of four.
+   * Now they are one height, one radius and one padding, the arrows are square at that height,
+   * and the two groups are separated by the gap between them rather than by being different
+   * shapes.
+   *
+   * 26px matches the prompt box's own buttons below, so a glance down the right-hand edge sees
+   * one size rather than three.
+   */
   &__navbtn {
-    min-height:    0;
-    height:        24px;
-    padding:       0 8px;
-    font-size:     11px;
-    border-radius: 12px;
-    border:        1px solid var(--border);
-    background:    var(--body-bg);
-    color:         var(--muted);
-    cursor:        pointer;
-    opacity:       0.75;
+    display:         inline-flex;
+    align-items:     center;
+    justify-content: center;
+    min-height:      0;
+    height:          var(--mc-chat-nav, 26px);
+    padding:         0 10px;
+    font-size:       11px;
+    line-height:     1;
+    border-radius:   8px;
+    border:          1px solid var(--border);
+    background:      var(--body-bg);
+    color:           var(--muted);
+    cursor:          pointer;
+    opacity:         0.85;
 
     &:hover { opacity: 1; color: var(--link); border-color: var(--link); }
     &--bottom { color: var(--link); opacity: 1; }
@@ -2830,6 +2852,8 @@ export default {
     &__slash,
     &__menu { margin: 0 10px; }
 
+    &__nav { padding: 2px 10px 0; }
+
     &__slash-help { display: none; }
     &__slash-hint { padding: 4px 10px 0; }
 
@@ -2842,12 +2866,13 @@ export default {
 
     /* Thumb-sized. 26px is right beside a 13px control on a desktop and too small to hit on
        glass, and these two are the controls somebody uses on every message. */
-    // Thumb-sized, and both from the same variable so they cannot drift apart.
+    // Thumb-sized, and all of them from the same two variables so they cannot drift apart.
     --mc-chat-btn: 36px;
+    --mc-chat-nav: 32px;
 
     &__send { font-size: 17px; }
     &__pill--icon { font-size: 15px; }
-    &__navbtn--caret { width: 34px; }
+    &__navbtn { padding: 0 12px; }
 
     &__textarea { min-height: 44px; padding: 8px 10px 2px; }
 
