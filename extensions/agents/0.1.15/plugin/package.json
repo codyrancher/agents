@@ -1,0 +1,21 @@
+{
+  "name": "agents",
+  "description": "The terminal, the agent pod and its conversations, offered to every extension in this Rancher",
+  "version": "0.1.15",
+  "private": false,
+  "icon": "https://codyrancher.github.io/agents/icon.svg",
+  "homepage": "https://github.com/codyrancher/agents",
+  "rancher": true,
+  "engines": {
+    "node": ">=24"
+  },
+  "devDependencies": {
+    "@vue/cli-plugin-babel": "5.0.9",
+    "@vue/cli-service": "5.0.8",
+    "@vue/cli-plugin-typescript": "5.0.9"
+  },
+  "files": [
+    "**/*"
+  ],
+  "main": "agents-0.1.15.umd.min.js"
+}
