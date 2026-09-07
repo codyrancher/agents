@@ -31,6 +31,64 @@ function escapeText(text) {
   return String(text || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+/**
+ * Claude Code's interactive managers: commands that open a full-screen picker rather than
+ * answering in the conversation.
+ *
+ * The chat cannot draw any of these, so sending one is the one thing this view does that leaves
+ * the pane in a state it has to hand to the terminal. Listed because knowing *what was sent* is
+ * the only reliable way to know that has happened - the pane's own shape cannot be told apart
+ * from an ordinary finished turn, which is the mistake the warning above used to make.
+ */
+const MANAGER_COMMANDS = ['mcp', 'permissions', 'hooks', 'memory', 'agents', 'model', 'config', 'resume', 'vim'];
+
+/** The manager a message opens, if it opens one: `/mcp`, `/mcp something`, and nothing else. */
+function managerIn(text) {
+  const match = /^\/([a-z-]+)\b/.exec(String(text || '').trim());
+
+  return match && MANAGER_COMMANDS.includes(match[1]) ? match[1] : '';
+}
+
+/**
+ * Where queued messages are kept between visits.
+ *
+ * They used to live only in this component's data, which meant they survived exactly as long as
+ * the component did: switching conversation or leaving the page unmounts it, and coming back
+ * showed a log with the message gone - while the terminal, reading the same pane, still had it
+ * in claude's input queue. So the one view that promised "this is waiting" was the one that
+ * forgot.
+ *
+ * Per pane, because a queue belongs to the conversation it was typed into. localStorage can
+ * throw outright in a private window or with site data blocked, so every read and write is
+ * guarded and an unavailable one simply means the old behaviour.
+ */
+const PENDING_KEY = 'mc-chat.pending';
+
+function readPending(paneId) {
+  try {
+    const all = JSON.parse(localStorage.getItem(PENDING_KEY) || '{}');
+
+    return Array.isArray(all[paneId]) ? all[paneId] : [];
+  } catch {
+    return [];
+  }
+}
+
+function writePending(paneId, list) {
+  try {
+    const all = JSON.parse(localStorage.getItem(PENDING_KEY) || '{}');
+
+    if (list.length) {
+      all[paneId] = list;
+    } else {
+      delete all[paneId];
+    }
+    localStorage.setItem(PENDING_KEY, JSON.stringify(all));
+  } catch {
+    // A browser that will not remember is not a view that fails.
+  }
+}
+
 const POLL_MS = 1500;
 const CHUNK = 3000;
 
@@ -182,6 +240,14 @@ export default {
       focused:     false,
       // A touch screen, which is the only place the caret keys below are worth the room.
       coarse:      typeof window !== 'undefined' && !!window.matchMedia?.('(pointer: coarse)').matches,
+      /**
+       * The interactive command this view last put into the pane, while its picker is still up.
+       *
+       * Set when one is sent and cleared the moment the conversation moves on - see
+       * `prunePending`'s neighbour, `clearManager`. It exists so `takenOver` is something known
+       * rather than something inferred.
+       */
+      manager:     '',
       /**
        * Images being written into the pod, whose paths are already in the box.
        *
@@ -373,21 +439,23 @@ export default {
     },
 
     /**
-     * The pane is showing something this view cannot draw, and is waiting on it.
+     * The pane is showing a full-screen picker this view cannot draw.
      *
-     * readPane recognises four things: a login, a numbered list, a yes/no, and an idle prompt.
-     * Claude Code's own managers - /permissions, /mcp, /memory, /hooks, /agents - are none of
-     * those; they are full-screen pickers. So the chat drew nothing at all, and because Escape
-     * is only offered while claude is *working*, there was no way out of one either: every
-     * message typed afterwards went into the picker's own input instead of the conversation.
+     * Known positively, from what was sent, and NOT inferred from the pane's shape. The first
+     * version of this asked "not busy, not idle, no dialog, not gone" - which sounds like a
+     * description of a takeover and is really a description of everything readPane does not
+     * classify. readPane recognises four shapes: a login, a numbered list, a yes/no, and a bare
+     * prompt. A finished turn whose last line is claude's own status - `Cooked for 10m 11s ·
+     * done` - is none of them: not busy, because it says done, and not idle, because the prompt
+     * row is not empty. So the warning fired on ordinary completed work, repeatedly, and told
+     * the person their conversation was broken when it was not.
      *
-     * Not busy, not idle, no dialog and not gone is exactly that state, and it is worth saying
-     * rather than leaving as a chat that has quietly stopped accepting messages.
+     * The commands below are claude's interactive managers; sending one is the only way this
+     * view can put the pane into a state it cannot render, and we know when we have. That makes
+     * this a fact rather than a guess, and it cannot fire on output.
      */
     takenOver() {
-      const { busy, idle, gone, dialog } = this.pane;
-
-      return this.attached && !busy && !idle && !gone && !dialog && !!this.paneText.trim();
+      return this.attached && !!this.manager && !this.pane.dialog && !this.pane.gone;
     },
 
     /** The last few lines of it, so what has taken the pane over is at least legible. */
@@ -397,6 +465,16 @@ export default {
   },
 
   watch: {
+    // Written on every change rather than at the point of sending: a message is also removed
+    // when the transcript catches up with it, and a store that only ever grew would resurrect
+    // retired messages on the next visit.
+    pending: {
+      handler(list) {
+        writePending(this.paneId, list);
+      },
+      deep: true,
+    },
+
     // A new name being typed starts the menu at the top again, and un-dismisses it: Escape
     // hides the menu for the command being typed, not for the rest of the session.
     draft(now, before) {
@@ -408,6 +486,8 @@ export default {
   },
 
   mounted() {
+    // Anything typed into this pane and not yet recorded, from a previous visit.
+    this.pending = readPending(this.paneId);
     this.poll();
     this.readCommands();
     this.readOptions();
@@ -473,10 +553,14 @@ export default {
           'if tmux has-session -t "mc-$ID" 2>/dev/null; then tmux capture-pane -p -t "mc-$ID" | tail -n 40; else echo "@@NOPANE"; fi',
         ].join('\n'));
 
+        const before = this.messages.length;
+
         this.absorb(out);
         // After absorb, which is what moves the transcript on: a queued message is retired by
-        // the line claude has just written for it.
+        // the line claude has just written for it, and a picker is over once claude is writing
+        // into the conversation again.
         this.prunePending();
+        this.clearManager(this.messages.length > before);
         this.error = '';
       } catch (e) {
         this.error = e.message || String(e);
@@ -666,6 +750,9 @@ export default {
           await this.start();
         }
         await this.say(text);
+        // Typing `/mcp` by hand puts the pane into the same state the Customize menu does, so
+        // it is recorded the same way rather than only when the menu was used.
+        this.manager = managerIn(text) || this.manager;
         // Recorded before the poll rather than after it: the point of this is that there is
         // never a moment where the box is empty and the log does not have it.
         this.pending = [...this.pending, {
@@ -874,6 +961,7 @@ export default {
         }
         await this.say(`/${ command }`);
         this.error = '';
+        this.manager = command;
         // After the command, so the terminal opens on the manager rather than on the prompt.
         this.$emit('view', 'terminal');
       } catch (e) {
@@ -886,6 +974,9 @@ export default {
 
     /** Escape, from a pane the chat cannot draw. The one way out that always exists. */
     async escapePane() {
+      // Cleared optimistically: Escape is what closes a picker, and leaving the warning up until
+      // the next poll agrees would be the same "says something untrue" problem in miniature.
+      this.manager = '';
       try {
         await this.keys('Escape');
         await new Promise((resolve) => setTimeout(resolve, 300));
@@ -894,6 +985,22 @@ export default {
         this.error = e.message || String(e);
       }
       setTimeout(() => this.poll(), 400);
+    },
+
+    /**
+     * The picker is gone: the conversation moved on, or the pane is showing something readPane
+     * understands again.
+     *
+     * A manager writes nothing to the transcript, so a transcript that has grown is proof that
+     * claude is answering in the conversation again. `idle` and `busy` are the same evidence
+     * from the pane's side. Any of them is enough, and being too eager to clear this is the safe
+     * direction to be wrong in: the cost is a warning that vanishes early, against a warning
+     * that lies.
+     */
+    clearManager(grew) {
+      if (this.manager && (grew || this.pane.idle || this.pane.busy || this.pane.gone)) {
+        this.manager = '';
+      }
     },
 
     /**
