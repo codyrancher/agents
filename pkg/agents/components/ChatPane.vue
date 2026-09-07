@@ -171,7 +171,7 @@ export default {
        * wrong the first time a new one ships.
        */
       options:     {
-        read: false, models: [], efforts: [], modes: [], model: '', modelSource: '', effort: '', mode: '',
+        read: false, models: [], efforts: [], model: '', modelSource: '', effort: '',
       },
       mcp:         {
         read: false, loading: false, servers: [], error: '',
@@ -718,9 +718,9 @@ export default {
         'echo @@ENV',
         'printenv ANTHROPIC_MODEL 2>/dev/null || true',
         'echo @@FILES',
-        // Two lines, always both, so a blank first line still means "settings.json sets none"
-        // rather than shifting ~/.claude.json's answer into its place.
-        `node -e 'const fs=require("fs");const g=(f,k)=>{try{return String(JSON.parse(fs.readFileSync(f,"utf8"))[k]||"")}catch(e){return ""}};const s=process.env.HOME+"/.claude/settings.json";const c=process.env.HOME+"/.claude.json";console.log(g(s,"model"));console.log(g(c,"model"));console.log(g(s,"effort")||g(s,"effortLevel"));console.log(g(s,"permissionMode")||g(s,"defaultMode"))' 2>/dev/null`,
+        // Three lines, always all three, so a blank first line still means "settings.json sets
+        // no model" rather than shifting ~/.claude.json's answer into its place.
+        `node -e 'const fs=require("fs");const g=(f,k)=>{try{return String(JSON.parse(fs.readFileSync(f,"utf8"))[k]||"")}catch(e){return ""}};const s=process.env.HOME+"/.claude/settings.json";const c=process.env.HOME+"/.claude.json";console.log(g(s,"model"));console.log(g(c,"model"));console.log(g(s,"effort")||g(s,"effortLevel"))' 2>/dev/null`,
         'echo @@END',
       ].join('\n');
       const out = await this.run(script, 30000).catch(() => '');
@@ -744,14 +744,12 @@ export default {
         read:        true,
         models:      modelAliases(help),
         efforts:     flagChoices(help, '--effort'),
-        modes:       flagChoices(help, '--permission-mode'),
         model:       found.model,
         modelSource: found.source,
         // Only if something recorded it. There is no flag to read the running session's effort
-        // or mode back out of, so an unset one is shown as unset rather than guessed at - the
-        // button then reads "model" and "permissions" rather than claiming a value.
+        // back out of, so an unset one is shown as unset rather than guessed at, and the button
+        // reads "model" rather than claiming a value.
         effort:      (files[3] || '').trim(),
-        mode:        (/--permission-mode[\s=]+(\S+)/.exec(argv)?.[1] || (files[4] || '').trim()),
       };
     },
 
@@ -1886,37 +1884,17 @@ export default {
         </button>
 
         <!--
-          The mode indicator. It opens claude's own permissions manager rather than offering a
-          list, because there is no slash command that sets a mode: `/permissions` is a picker,
-          and the TUI cycles with shift+tab. A menu of six modes here would have been a menu
-          that could not do what it said. The name is shown only when something actually
-          recorded it - the pane's `--permission-mode`, or settings - and otherwise the button
-          says what it opens.
+          There is no permissions control here, deliberately.
+
+          Every pane starts claude with `--dangerously-skip-permissions` (see
+          seed/claude-session.sh), so the mode is not a thing that changes and a button showing
+          it was a button that only ever opened a picker. That picker is a full-screen terminal
+          UI: the chat could not draw it and, before the warning below existed, could not leave
+          it either - which is how a button that looked like a label ended a conversation.
+
+          If a permission prompt does appear, the warning below says so and the terminal is one
+          press away, which is where it can be answered.
         -->
-        <button
-          v-if="options.read"
-          type="button"
-          class="mc-chat__pill"
-          :title="options.mode ? `Permission mode: ${ options.mode }` : 'Permissions'"
-          :disabled="optionBusy === 'permissions'"
-          @click="openManager('permissions')"
-        >
-          {{ optionBusy === 'permissions' ? '…' : (options.mode || 'permissions') }}
-          <svg
-            class="mc-chat__chev"
-            width="8"
-            height="8"
-            viewBox="0 0 8 8"
-            aria-hidden="true"
-          ><path
-            d="M1 2.5 L4 5.5 L7 2.5"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1.4"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-          /></svg>
-        </button>
 
         <span class="mc-chat__bar-gap" />
 
