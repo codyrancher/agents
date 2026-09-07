@@ -2050,6 +2050,15 @@ export default {
   min-width:      0;
   background:     var(--terminal-bg, var(--body-bg));
   color:          var(--body-text);
+  /*
+   * A real prose font, not the terminal's.
+   *
+   * The chat is drawn where the terminal is, so with no family of its own it inherited the
+   * harness-terminal monospace - which has no em-dash glyph, so every "—" in an agent's reply
+   * came out as "_". Prose belongs in a proportional font anyway; code and the option pills
+   * still ask for monospace explicitly where they need it.
+   */
+  font-family:    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   font-size:      13px;
   line-height:    1.5;
 
