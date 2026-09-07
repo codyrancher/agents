@@ -100,7 +100,7 @@ export default {
     label:     { type: String, default: 'the agent' },
   },
 
-  emits: ['state'],
+  emits: ['state', 'view'],
 
   data() {
     return {
@@ -370,6 +370,29 @@ export default {
 
     working() {
       return this.pane.busy;
+    },
+
+    /**
+     * The pane is showing something this view cannot draw, and is waiting on it.
+     *
+     * readPane recognises four things: a login, a numbered list, a yes/no, and an idle prompt.
+     * Claude Code's own managers - /permissions, /mcp, /memory, /hooks, /agents - are none of
+     * those; they are full-screen pickers. So the chat drew nothing at all, and because Escape
+     * is only offered while claude is *working*, there was no way out of one either: every
+     * message typed afterwards went into the picker's own input instead of the conversation.
+     *
+     * Not busy, not idle, no dialog and not gone is exactly that state, and it is worth saying
+     * rather than leaving as a chat that has quietly stopped accepting messages.
+     */
+    takenOver() {
+      const { busy, idle, gone, dialog } = this.pane;
+
+      return this.attached && !busy && !idle && !gone && !dialog && !!this.paneText.trim();
+    },
+
+    /** The last few lines of it, so what has taken the pane over is at least legible. */
+    paneTail() {
+      return this.paneText.split('\n').filter((l) => l.trim()).slice(-6).join('\n');
     },
   },
 
@@ -830,11 +853,18 @@ export default {
     },
 
     /**
-     * Open one of claude's own managers in the pane.
+     * Open one of claude's own managers, and go to the terminal, because that is where it is.
      *
-     * `/mcp` and `/permissions` are interactive in Claude Code too - they are pickers, not
-     * values - so this opens the real one rather than reimplementing it. Its prompt arrives
-     * through the same pane-dialog path this view already draws options for.
+     * `/permissions`, `/mcp`, `/memory` and the rest are full-screen pickers - keyboard-driven
+     * terminal UIs, not prompts with options in them. The claim that "its prompt arrives
+     * through the same pane-dialog path this view already draws options for" was simply wrong:
+     * readPane recognises a login, a numbered list and a yes/no, and a manager is none of them.
+     * So opening one from the chat drew nothing, and since Escape is only offered while claude
+     * is working there was no way back either - every message typed afterwards went into the
+     * picker instead of the conversation. That is the bug this replaces.
+     *
+     * The terminal can drive them perfectly well, and switching to it is what somebody wanted
+     * when they pressed the button. The chat is one keypress away again afterwards.
      */
     async openManager(command) {
       this.menu = '';
@@ -846,12 +876,26 @@ export default {
         }
         await this.say(`/${ command }`);
         this.error = '';
+        // After the command, so the terminal opens on the manager rather than on the prompt.
+        this.$emit('view', 'terminal');
       } catch (e) {
         this.error = e.message || String(e);
       } finally {
         this.optionBusy = '';
         this.poll();
       }
+    },
+
+    /** Escape, from a pane the chat cannot draw. The one way out that always exists. */
+    async escapePane() {
+      try {
+        await this.keys('Escape');
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        await this.keys('Escape');
+      } catch (e) {
+        this.error = e.message || String(e);
+      }
+      setTimeout(() => this.poll(), 400);
     },
 
     /**
@@ -1749,6 +1793,39 @@ export default {
       </li>
     </ul>
 
+    <!--
+      A pane the chat cannot draw, said out loud with the two ways out of it.
+
+      Without this, a full-screen picker in the pane looked exactly like a chat that had
+      stopped working: nothing drawn, no error, and every message typed going somewhere the
+      conversation never saw.
+    -->
+    <div
+      v-if="takenOver"
+      class="mc-chat__takeover"
+    >
+      <div class="mc-chat__takeover-head">
+        <span>Claude Code is showing something here that the chat cannot draw.</span>
+        <button
+          type="button"
+          class="mc-chat__navbtn"
+          title="Send Escape to close it"
+          @click="escapePane"
+        >
+          Escape
+        </button>
+        <button
+          type="button"
+          class="mc-chat__navbtn"
+          title="Open the terminal, where it can be used"
+          @click="$emit('view', 'terminal')"
+        >
+          Open the terminal
+        </button>
+      </div>
+      <pre class="mc-chat__takeover-tail">{{ paneTail }}</pre>
+    </div>
+
     <div
       v-if="slashHint"
       class="mc-chat__slash-hint"
@@ -2408,6 +2485,35 @@ export default {
     text-align:      center;
   }
 
+  &__takeover {
+    flex:          0 0 auto;
+    margin:        0 18px 6px;
+    padding:       8px 10px;
+    border:        1px solid var(--warning);
+    border-radius: 8px;
+    background:    color-mix(in srgb, var(--warning) 10%, transparent);
+    font-size:     12px;
+  }
+
+  &__takeover-head {
+    display:     flex;
+    flex-wrap:   wrap;
+    gap:         6px;
+    align-items: center;
+  }
+
+  &__takeover-head > span { flex: 1 1 auto; min-width: 0; }
+
+  &__takeover-tail {
+    margin:      6px 0 0;
+    max-height:  84px;
+    overflow:    auto;
+    color:       var(--muted);
+    font-family: var(--mc-terminal-font, monospace);
+    font-size:   11px;
+    white-space: pre-wrap;
+  }
+
   &__slash-hint {
     flex:      0 0 auto;
     padding:   4px 18px 0;
@@ -2658,14 +2764,32 @@ export default {
   &__agent-last { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   &__agent-when { color: var(--muted); font-size: 11px; }
 
+  /*
+   * The row that floats over the bottom of the log.
+   *
+   * It spans the pane rather than hugging the right edge, so the caret keys sit on the left -
+   * under the thumb that is about to reach into the message box below them - and the ones that
+   * move the log stay on the right where they were. Bunched together on the right they read as
+   * one group of four, which they are not: two act on the box and two act on the log.
+   */
   &__nav {
-    position:  absolute;
-    right:     26px;
-    bottom:    118px;
-    display:   flex;
-    gap:       4px;
-    z-index:   3;
+    position:        absolute;
+    left:            26px;
+    right:           26px;
+    bottom:          118px;
+    display:         flex;
+    justify-content: flex-end;
+    gap:             4px;
+    z-index:         3;
+    // The row is only the buttons: without this it is a full-width strip over the log, and
+    // every click meant for a message lands on it instead.
+    pointer-events:  none;
+
+    > * { pointer-events: auto; }
   }
+
+  // Everything after the caret keys goes to the right; they stay at the left.
+  &__navbtn--caret + :not(&__navbtn--caret) { margin-left: auto; }
 
   &__navbtn {
     min-height:    0;

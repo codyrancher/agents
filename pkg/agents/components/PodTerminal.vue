@@ -1138,6 +1138,7 @@ export default {
       :image-dir="imageDir"
       :home="home"
       :label="label"
+      @view="setView"
     />
     <div
       v-show="view === 'terminal'"
