@@ -95,15 +95,6 @@ const PLACEMENT_CHOICES = [
   { id: 'right', icon: 'dockRight', label: 'Dock right' },
 ];
 
-// Phone width, the breakpoint the rest of this extension uses (PodTerminal's font switch, the
-// chat's own spacing). One matchMedia for the component rather than a resize listener.
-const NARROW_PANEL = '(max-width: 760px)';
-const narrowQuery = typeof window !== 'undefined' && window.matchMedia ? window.matchMedia(NARROW_PANEL) : null;
-
-function isNarrowPanel() {
-  return !!narrowQuery?.matches;
-}
-
 export default {
   name: 'AgentPanel',
 
@@ -139,19 +130,7 @@ export default {
       drag:      null,
       // Collected with function refs rather than string ones, which is what Tabbed does and for
       // the same reason: a string ref inside v-for is an array whose order is not the list's.
-      tabRefs:    {},
       renameRef:  null,
-      /**
-       * Whether the panel is phone-width, which decides whether the conversations are a row of
-       * tabs or a menu.
-       *
-       * 760px, the breakpoint the rest of this extension uses. This is a decision in
-       * JavaScript rather than a media query because it is not a style: a scrolling row of
-       * tabs does not become usable by being narrower, and on a screen this size the row costs
-       * a line of the chat to show two and a half names. Behind a menu, the pane is the panel.
-       */
-      narrow:     isNarrowPanel(),
-      onNarrow:   null,
     };
   },
 
@@ -287,12 +266,6 @@ export default {
       this.setOpen(true);
     }
 
-    if (narrowQuery) {
-      this.onNarrow = (event) => {
-        this.narrow = event.matches;
-      };
-      narrowQuery.addEventListener('change', this.onNarrow);
-    }
   },
 
   beforeUnmount() {
@@ -303,9 +276,6 @@ export default {
     this.endGrab();
     window.removeEventListener('resize', this.clamp);
 
-    if (narrowQuery && this.onNarrow) {
-      narrowQuery.removeEventListener('change', this.onNarrow);
-    }
   },
 
   methods: {
@@ -585,30 +555,7 @@ export default {
       }
     },
 
-    /**
-     * Middle click closes the tab under the pointer, the way it does in a browser.
-     *
-     * On the tab itself now that the row is ours, so there is nothing to resolve out of the DOM.
-     */
-    onAuxClick(id, event) {
-      if (event.button !== MIDDLE_BUTTON) {
-        return;
-      }
 
-      event.preventDefault();
-      this.closeSession(id);
-    },
-
-    /**
-     * Chromium starts its autoscroll on middle *mousedown*, not on the click.
-     *
-     * Preventing it only on auxclick leaves the scroll cursor stuck over the panel.
-     */
-    onAuxDown(event) {
-      if (event.button === MIDDLE_BUTTON) {
-        event.preventDefault();
-      }
-    },
 
     // -----------------------------------------------------------------------
     // Naming
@@ -675,23 +622,6 @@ export default {
     // Keyboard, as Tabbed does it
     // -----------------------------------------------------------------------
 
-    /** Left/right and up/down move between tabs and take the focus with them. Cyclical. */
-    selectNext(direction) {
-      const ids = this.sessions.map((session) => session.id);
-
-      if (!ids.length) {
-        return;
-      }
-
-      const current = ids.indexOf(this.active);
-      const next = (current + direction + ids.length) % ids.length;
-
-      this.select(ids[next]);
-      this.$nextTick(() => {
-        this.$refs.tablist?.removeAttribute('tabindex');
-        this.tabRefs[ids[next]]?.focus();
-      });
-    },
   },
 };
 </script>
@@ -735,151 +665,47 @@ export default {
         in full, and rename and end become entries somebody can hit. Everything the row does is
         in sessionMenuItems, because the row is not rendered beside it.
       -->
-      <template v-if="narrow">
-        <SMenu
-          :items="sessionMenuItems"
-          align="left"
-          aria-label="Conversations"
-          class="mc-agent__picker"
-          @select="onSessionMenu"
-        >
-          <template #trigger>
-            <span class="mc-agent__picker-title">{{ (activeSession && activeSession.title) || 'Conversations' }}</span>
-            <span
-              v-if="sessions.length > 1"
-              class="mc-agent__picker-count"
-            >{{ sessions.length }}</span>
-            <SIcon
-              name="chevronDown"
-              :size="12"
-            />
-          </template>
-        </SMenu>
+      <SMenu
+        :items="sessionMenuItems"
+        align="left"
+        aria-label="Conversations"
+        class="mc-agent__picker"
+        @select="onSessionMenu"
+      >
+        <template #trigger>
+          <span class="mc-agent__picker-title">{{ (activeSession && activeSession.title) || 'Conversations' }}</span>
+          <span
+            v-if="sessions.length > 1"
+            class="mc-agent__picker-count"
+          >{{ sessions.length }}</span>
+          <SIcon
+            name="chevronDown"
+            :size="12"
+          />
+        </template>
+      </SMenu>
 
-        <!--
-          The rename box, which on a phone has no tab to live in. Same handlers as the one in
-          the row, so Enter commits and Escape abandons exactly as it does there.
-        -->
-        <input
-          v-if="renaming"
-          :ref="(el) => { if (el) renameRef = el; }"
-          v-model="renaming.title"
-          class="mc-agent__rename mc-agent__rename--wide"
-          aria-label="Name this conversation"
-          @keydown.enter.prevent="commitRename"
-          @keydown.esc.prevent="renaming = null"
-          @blur="commitRename"
-        >
-      </template>
+      <!-- The rename box, which now has no tab to live in. -->
+      <input
+        v-if="renaming"
+        :ref="(el) => { if (el) renameRef = el; }"
+        v-model="renaming.title"
+        class="mc-agent__rename mc-agent__rename--wide"
+        aria-label="Name this conversation"
+        @keydown.enter.prevent="commitRename"
+        @keydown.esc.prevent="renaming = null"
+        @blur="commitRename"
+      >
 
       <!--
-        Rancher's tab row. See the note at the top of this file for what it is and why it is
-        not the component.
+        Rancher's tab row used to be here, and is gone.
+
+        It was one line across the top of a panel that is often 300px tall, showing names the
+        picker above already shows - and with the picker beside it, two controls answering one
+        question. Choosing, renaming, ending and starting a conversation are all in the menu,
+        which is where they can be read in full and hit with a thumb; moving between them is
+        the menu's own arrow keys rather than the row's.
       -->
-      <ul
-        v-else
-        ref="tablist"
-        role="tablist"
-        class="tabs horizontal"
-        tabindex="0"
-        @keydown.right.prevent="selectNext(1)"
-        @keydown.left.prevent="selectNext(-1)"
-        @keydown.down.prevent="selectNext(1)"
-        @keydown.up.prevent="selectNext(-1)"
-      >
-        <li
-          v-for="session in sessions"
-          :id="session.id"
-          :key="session.id"
-          :data-testid="session.id"
-          :class="{ tab: true, active: session.id === active }"
-          @auxclick="onAuxClick(session.id, $event)"
-          @mousedown="onAuxDown"
-        >
-          <input
-            v-if="renaming && renaming.id === session.id"
-            :ref="(el) => { if (el) renameRef = el; }"
-            v-model="renaming.title"
-            class="mc-agent__rename"
-            aria-label="Name this conversation"
-            @keydown.enter.prevent="commitRename"
-            @keydown.esc.prevent="renaming = null"
-            @blur="commitRename"
-          >
-          <a
-            v-else
-            :id="`tab-${ session.id }`"
-            :ref="(el) => { if (el) tabRefs[session.id] = el; }"
-            :aria-controls="session.id"
-            :aria-selected="session.id === active"
-            :aria-label="session.title"
-            role="tab"
-            :tabindex="session.id === active ? '0' : '-1'"
-            @click.prevent="select(session.id)"
-            @dblclick.prevent="startRename(session.id)"
-            @keyup.enter.space="select(session.id)"
-          >
-            <span>{{ session.title }}</span>
-          </a>
-
-          <!-- On the tab, not at the end of the row: closing the third conversation should not
-               mean selecting it first. -->
-          <button
-            v-if="!renaming || renaming.id !== session.id"
-            type="button"
-            class="mc-agent__tab-control mc-agent__tab-control--rename"
-            :title="`Rename ${ session.title }`"
-            :aria-label="`Rename ${ session.title }`"
-            @click.stop="startRename(session.id)"
-          >
-            <!--
-              The same 12 as every other control on this bar.
-              It was 20, then 14, on the theory that the font draws `icon-edit` smaller within
-              its em than `icon-close` and wants compensating. Both read as too big. Whatever
-              the glyph metrics say, matching the number is what matches the eye here, so the
-              number matches.
-            -->
-            <SIcon
-              name="edit"
-              :size="12"
-            />
-          </button>
-          <button
-            type="button"
-            class="mc-agent__tab-control"
-            :title="`End ${ session.title } (or middle click the tab)`"
-            :aria-label="`End ${ session.title }`"
-            @click.stop="closeSession(session.id)"
-          >
-            <SIcon
-              name="close"
-              :size="12"
-            />
-          </button>
-        </li>
-
-        <!--
-          Inside the scrolling row and immediately after the last tab, because it belongs to the
-          tabs: add a fourth and it moves along with them. Rancher's own add control is in a
-          `tab-list-footer` nested in the tab list, which is the shape kept here.
-        -->
-        <ul class="tab-list-footer">
-          <li>
-            <button
-              type="button"
-              class="mc-agent__tab-control"
-              title="Another conversation"
-              aria-label="Another conversation"
-              @click="startNew"
-            >
-              <SIcon
-                name="plus"
-                :size="12"
-              />
-            </button>
-          </li>
-        </ul>
-      </ul>
 
       <!--
         Outside the scroller, pinned to the right edge: however many conversations are open, and

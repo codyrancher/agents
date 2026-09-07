@@ -21,6 +21,18 @@ import { podExecOnce, statPodPath, readPodFileBase64 } from '../pod';
 import { agentPod, sessionCommand } from '../agent';
 import PodFileViewer from './PodFileViewer.vue';
 
+/**
+ * The disclosure chevron on the prompt box's own controls.
+ *
+ * Inline SVG rather than Rancher's icon font: these buttons are 11px text and the font's
+ * chevron is drawn for a 16px control, so it sat a pixel low and a shade too heavy beside
+ * them. Six lines of SVG scales with the text and needs no stylesheet to have loaded.
+ */
+const SChevron = {
+  name:     'SChevron',
+  template: `<svg class="mc-chat__chev" width="8" height="8" viewBox="0 0 8 8" aria-hidden="true"><path d="M1 2.5 L4 5.5 L7 2.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+};
+
 const THUMB_MAX = 400_000;
 const MIME = {
   png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', bmp: 'image/bmp', svg: 'image/svg+xml',
@@ -85,7 +97,7 @@ function b64(text) {
 export default {
   name: 'ChatPane',
 
-  components: { PodFileViewer },
+  components: { PodFileViewer, SChevron },
 
   props: {
     session:   { type: String, default: 'agent-1' },
@@ -170,7 +182,7 @@ export default {
        * wrong the first time a new one ships.
        */
       options:     {
-        read: false, models: [], efforts: [], modes: [], model: '', modelSource: '', effort: '',
+        read: false, models: [], efforts: [], modes: [], model: '', modelSource: '', effort: '', mode: '',
       },
       mcp:         {
         read: false, loading: false, servers: [], error: '',
@@ -178,6 +190,7 @@ export default {
       // Which menu is open, and which one is mid-apply.
       menu:        '',
       optionBusy:  '',
+      focused:     false,
     };
   },
 
@@ -261,6 +274,25 @@ export default {
           ...t, summary: toolSummary(t), summaryHtml: linkPaths(escapeText(toolSummary(t))),
         })),
       }));
+    },
+
+    /**
+     * The Customize section of the command menu.
+     *
+     * The VS Code extension's `/` menu has one, and what is in it is "MCP servers, slash
+     * commands, output styles, hooks, memory, permissions and plugins" - claude's own pickers,
+     * reached from the command menu rather than from buttons on the prompt box. Only the ones
+     * this pane can actually open are listed: each is a slash command typed into the pane, and
+     * its dialog comes back through the path this view already draws options for.
+     */
+    customize() {
+      return [
+        { command: 'mcp', help: 'MCP servers' },
+        { command: 'permissions', help: 'tool permissions' },
+        { command: 'hooks', help: 'hooks' },
+        { command: 'memory', help: 'the memory files' },
+        { command: 'agents', help: 'subagent definitions' },
+      ];
     },
 
     /** Every command that could be typed here: claude's own, then this pod's own. */
@@ -659,7 +691,7 @@ export default {
         'echo @@FILES',
         // Two lines, always both, so a blank first line still means "settings.json sets none"
         // rather than shifting ~/.claude.json's answer into its place.
-        `node -e 'const fs=require("fs");const g=(f,k)=>{try{return String(JSON.parse(fs.readFileSync(f,"utf8"))[k]||"")}catch(e){return ""}};const s=process.env.HOME+"/.claude/settings.json";const c=process.env.HOME+"/.claude.json";console.log(g(s,"model"));console.log(g(c,"model"));console.log(g(s,"effort")||g(s,"effortLevel"))' 2>/dev/null`,
+        `node -e 'const fs=require("fs");const g=(f,k)=>{try{return String(JSON.parse(fs.readFileSync(f,"utf8"))[k]||"")}catch(e){return ""}};const s=process.env.HOME+"/.claude/settings.json";const c=process.env.HOME+"/.claude.json";console.log(g(s,"model"));console.log(g(c,"model"));console.log(g(s,"effort")||g(s,"effortLevel"));console.log(g(s,"permissionMode")||g(s,"defaultMode"))' 2>/dev/null`,
         'echo @@END',
       ].join('\n');
       const out = await this.run(script, 30000).catch(() => '');
@@ -687,8 +719,10 @@ export default {
         model:       found.model,
         modelSource: found.source,
         // Only if something recorded it. There is no flag to read the running session's effort
-        // back out of, so an unset one is shown as unset rather than guessed at.
+        // or mode back out of, so an unset one is shown as unset rather than guessed at - the
+        // button then reads "model" and "permissions" rather than claiming a value.
         effort:      (files[3] || '').trim(),
+        mode:        (/--permission-mode[\s=]+(\S+)/.exec(argv)?.[1] || (files[4] || '').trim()),
       };
     },
 
@@ -710,12 +744,23 @@ export default {
       }
     },
 
+    /** The `/` button: the command menu, opened the way typing a slash opens it. */
+    openCommandMenu() {
+      this.menu = '';
+      this.slashDismissed = false;
+      if (!this.draft.startsWith('/')) {
+        this.draft = `/${ this.draft }`;
+      }
+      this.slashIndex = 0;
+      this.$nextTick(() => this.$refs.box?.focus());
+      if (!this.mcp.read && !this.mcp.loading) {
+        this.readMcp();
+      }
+    },
+
     toggleMenu(kind) {
       this.menu = this.menu === kind ? '' : kind;
 
-      if (this.menu === 'mcp' && !this.mcp.read && !this.mcp.loading) {
-        this.readMcp();
-      }
     },
 
     /**
@@ -1508,146 +1553,86 @@ export default {
     </div>
 
     <!--
-      What this conversation is set to, and the menus that change it.
-
-      Above the composer and below the log, which is where Claude Code's own status line puts
-      the same facts. Each button carries its current value so the bar answers the question
-      without being opened; the menus themselves are lists rather than native selects, because
-      a select cannot show which server is connected or where a model setting came from.
+      The model picker, with Effort as a row inside it rather than as a control of its own -
+      "when the current model supports effort levels, the picker also shows an Effort row". It
+      is a property of the model, and a second button on the bar for it said otherwise.
     -->
     <div
-      v-if="options.read"
-      class="mc-chat__opts"
+      v-if="menu === 'model'"
+      class="mc-chat__menu"
     >
+      <p class="mc-chat__menu-head">
+        Model<span
+          v-if="options.modelSource"
+          class="mc-chat__menu-note"
+        >set by {{ options.modelSource }}</span>
+      </p>
       <button
-        type="button"
-        class="mc-chat__opt"
-        :class="{ 'mc-chat__opt--on': menu === 'model' }"
-        :disabled="optionBusy === 'model'"
-        :title="options.modelSource ? `Model, set by ${ options.modelSource }` : 'Model'"
-        @click="toggleMenu('model')"
-      >
-        <span class="mc-chat__opt-label">model</span>
-        <span class="mc-chat__opt-value">{{ optionBusy === 'model' ? '…' : (options.model || 'default') }}</span>
-      </button>
-
-      <button
-        v-if="options.efforts.length"
-        type="button"
-        class="mc-chat__opt"
-        :class="{ 'mc-chat__opt--on': menu === 'effort' }"
-        :disabled="optionBusy === 'effort'"
-        title="Effort level for this session"
-        @click="toggleMenu('effort')"
-      >
-        <span class="mc-chat__opt-label">effort</span>
-        <span class="mc-chat__opt-value">{{ optionBusy === 'effort' ? '…' : (options.effort || 'default') }}</span>
-      </button>
-
-      <button
-        type="button"
-        class="mc-chat__opt"
-        :class="{ 'mc-chat__opt--on': menu === 'mcp' }"
-        title="MCP servers"
-        @click="toggleMenu('mcp')"
-      >
-        <span class="mc-chat__opt-label">mcp</span>
-        <span class="mc-chat__opt-value">{{ mcp.read ? `${ mcp.servers.filter((x) => x.ok).length }/${ mcp.servers.length }` : '…' }}</span>
-      </button>
-
-      <button
-        type="button"
-        class="mc-chat__opt"
-        :disabled="optionBusy === 'permissions'"
-        title="Open claude's permission manager in this pane"
-        @click="openManager('permissions')"
-      >
-        <span class="mc-chat__opt-label">permissions</span>
-      </button>
-    </div>
-
-    <!-- The open menu, drawn in the same place whichever it is. -->
-    <ul
-      v-if="menu === 'model' || menu === 'effort'"
-      class="mc-chat__slash mc-chat__opt-menu"
-    >
-      <li
-        v-for="value in (menu === 'model' ? options.models : options.efforts)"
+        v-for="value in options.models"
         :key="value"
-      >
-        <button
-          type="button"
-          class="mc-chat__slash-item"
-          :class="{ 'mc-chat__slash-item--on': value === options[menu] }"
-          @click="applyOption(menu, value)"
-        >
-          <span class="mc-chat__slash-name">{{ value }}</span>
-          <span
-            v-if="value === options[menu]"
-            class="mc-chat__slash-source"
-          >current{{ menu === 'model' && options.modelSource ? ` · ${ options.modelSource }` : '' }}</span>
-        </button>
-      </li>
-    </ul>
-
-    <div
-      v-else-if="menu === 'mcp'"
-      class="mc-chat__slash mc-chat__opt-menu"
-    >
-      <p
-        v-if="mcp.loading"
-        class="mc-chat__opt-note"
-      >
-        <i class="icon icon-spinner icon-spin" /> Checking the servers&hellip;
-      </p>
-      <p
-        v-else-if="mcp.error"
-        class="mc-chat__opt-note mc-chat__error"
-      >
-        {{ mcp.error }}
-      </p>
-      <p
-        v-else-if="!mcp.servers.length"
-        class="mc-chat__opt-note"
-      >
-        No MCP servers are configured in this pod.
-      </p>
-      <ul v-else>
-        <li
-          v-for="server in mcp.servers"
-          :key="server.name"
-          class="mc-chat__mcp"
-        >
-          <span
-            class="mc-chat__mcp-dot"
-            :class="server.ok ? 'mc-chat__mcp-dot--ok' : 'mc-chat__mcp-dot--bad'"
-          />
-          <span class="mc-chat__mcp-name">{{ server.name }}</span>
-          <span class="mc-chat__mcp-detail">{{ server.detail }}</span>
-        </li>
-      </ul>
-      <!--
-        Adding, removing and authorising a server is claude's own picker in Claude Code too, so
-        this opens the real one rather than drawing a worse copy of it.
-      -->
-      <button
         type="button"
-        class="mc-chat__slash-item"
-        @click="openManager('mcp')"
+        class="mc-chat__menu-item"
+        :class="{ 'mc-chat__menu-item--on': value === options.model }"
+        @click="applyOption('model', value)"
       >
-        <span class="mc-chat__slash-name">/mcp</span>
-        <span class="mc-chat__slash-help">open claude&rsquo;s MCP manager in this pane</span>
+        <span class="mc-chat__menu-tick">{{ value === options.model ? '✓' : '' }}</span>
+        <span class="mc-chat__menu-name">{{ value }}</span>
       </button>
+
+      <template v-if="options.efforts.length">
+        <p class="mc-chat__menu-head">
+          Effort
+        </p>
+        <div class="mc-chat__efforts">
+          <button
+            v-for="value in options.efforts"
+            :key="value"
+            type="button"
+            class="mc-chat__effort"
+            :class="{ 'mc-chat__effort--on': value === options.effort }"
+            @click="applyOption('effort', value)"
+          >
+            {{ value }}
+          </button>
+        </div>
+      </template>
     </div>
 
     <!--
       The commands, while one is being typed. Above the box rather than below it, because the
       box is already at the bottom of the panel and a menu under it would be off-screen.
+
+      Customize is the extension's own section of this menu - "MCP servers, slash commands,
+      output styles, hooks, memory, permissions and plugins" - so MCP is reached from here
+      rather than from a button of its own on the bar.
     -->
     <ul
       v-if="slashOpen"
       class="mc-chat__slash"
     >
+      <li v-if="customize.length && !slashTyped.name.slice(1)">
+        <p class="mc-chat__menu-head">
+          Customize
+        </p>
+      </li>
+      <li
+        v-for="c in customize"
+        v-show="!slashTyped.name.slice(1)"
+        :key="`customize-${ c.command }`"
+      >
+        <button
+          type="button"
+          class="mc-chat__slash-item"
+          @click="openManager(c.command)"
+        >
+          <span class="mc-chat__slash-name">/{{ c.command }}</span>
+          <span class="mc-chat__slash-help">{{ c.help }}</span>
+          <span
+            v-if="c.command === 'mcp'"
+            class="mc-chat__slash-source"
+          >{{ mcp.read ? `${ mcp.servers.filter((x) => x.ok).length }/${ mcp.servers.length }` : '' }}</span>
+        </button>
+      </li>
       <li
         v-for="(c, i) in slashMatches"
         :key="c.name"
@@ -1674,27 +1659,88 @@ export default {
       {{ slashHint }}
     </div>
 
+    <!--
+      The prompt box: one bordered box with the text area and the controls inside it, which is
+      where Claude Code's VS Code extension puts them - "click the model name at the bottom of
+      the prompt box", "click the mode indicator at the bottom of the prompt box". They were a
+      row of outlined pills above the box, which read as four buttons competing with the thing
+      somebody is actually doing. Here they are quiet text until they are wanted.
+    -->
     <div
-      class="mc-chat__input"
-      :class="slashState ? `mc-chat__input--${ slashState }` : ''"
+      class="mc-chat__box"
+      :class="[slashState ? `mc-chat__box--${ slashState }` : '', { 'mc-chat__box--focus': focused }]"
     >
       <textarea
         ref="box"
         v-model="draft"
         class="mc-chat__textarea"
         rows="3"
-        :placeholder="working ? 'Queue the next message (Enter to send, Shift+Enter for a new line, paste an image to attach it)' : 'Message (Enter to send, Shift+Enter for a new line, / for commands)'"
+        :placeholder="working ? 'Queue the next message…' : 'Message Claude — / for commands'"
+        :title="'Enter to send, Shift+Enter for a new line, / for commands, paste an image to attach it'"
         @keydown="onKeydown"
         @paste="onPaste"
+        @focus="focused = true"
+        @blur="focused = false"
       />
-      <button
-        type="button"
-        class="mc-chat__send"
-        :disabled="!canSend"
-        @click="send"
-      >
-        {{ sending ? '…' : 'Send' }}
-      </button>
+      <div class="mc-chat__bar">
+        <!-- The model, and the effort level, which the picker carries as a row of its own. -->
+        <button
+          v-if="options.read"
+          type="button"
+          class="mc-chat__pill"
+          :class="{ 'mc-chat__pill--on': menu === 'model' }"
+          :title="options.modelSource ? `Model — set by ${ options.modelSource }` : 'Model'"
+          :disabled="optionBusy === 'model' || optionBusy === 'effort'"
+          @click="toggleMenu('model')"
+        >
+          {{ optionBusy === 'model' || optionBusy === 'effort' ? '…' : (options.model || 'model') }}<template v-if="options.effort"> · {{ options.effort }}</template>
+          <SChevron />
+        </button>
+
+        <!--
+          The mode indicator. It opens claude's own permissions manager rather than offering a
+          list, because there is no slash command that sets a mode: `/permissions` is a picker,
+          and the TUI cycles with shift+tab. A menu of six modes here would have been a menu
+          that could not do what it said. The name is shown only when something actually
+          recorded it - the pane's `--permission-mode`, or settings - and otherwise the button
+          says what it opens.
+        -->
+        <button
+          v-if="options.read"
+          type="button"
+          class="mc-chat__pill"
+          :title="options.mode ? `Permission mode: ${ options.mode }` : 'Permissions'"
+          :disabled="optionBusy === 'permissions'"
+          @click="openManager('permissions')"
+        >
+          {{ optionBusy === 'permissions' ? '…' : (options.mode || 'permissions') }}
+          <SChevron />
+        </button>
+
+        <span class="mc-chat__bar-gap" />
+
+        <!--
+          `/` opens the same menu typing one does, which is what the extension's command menu
+          button does, and is where MCP servers and the rest of Customize live.
+        -->
+        <button
+          type="button"
+          class="mc-chat__pill mc-chat__pill--icon"
+          title="Commands, MCP servers and settings"
+          @click="openCommandMenu"
+        >
+          /
+        </button>
+        <button
+          type="button"
+          class="mc-chat__send"
+          :disabled="!canSend"
+          :title="canSend ? 'Send' : 'Nothing to send'"
+          @click="send"
+        >
+          {{ sending ? '…' : '↑' }}
+        </button>
+      </div>
     </div>
   </div>
 </template>
@@ -2058,76 +2104,132 @@ export default {
     font-size:  11px;
   }
 
-  &__input {
-    flex:        0 0 auto;
-    display:     flex;
-    gap:         8px;
-    padding:     6px 18px 12px;
-    border-top:  1px solid var(--border);
-    align-items: flex-end;
+  // ── The prompt box ──
+  // One bordered box with the text area and the controls inside it. The border used to be on
+  // the textarea, with the send button beside it and four outlined pills on a row above; that
+  // is four competing rectangles around the one thing somebody is doing. The box owns the
+  // border, everything inside it is borderless, and the controls are quiet text until hovered.
+  &__box {
+    flex:          0 0 auto;
+    display:       flex;
+    flex-direction: column;
+    margin:        6px 18px 12px;
+    border:        1px solid var(--border);
+    border-radius: 10px;
+    background:    var(--body-bg);
+    transition:    border-color 0.12s ease;
+
+    &--focus { border-color: var(--link); }
+    &--known { border-color: var(--success); }
+    &--unknown { border-color: var(--warning); }
   }
 
   &__textarea {
-    flex:          1 1 auto;
-    resize:        vertical;
-    min-height:    44px;
-    font-size:     13px;
-    padding:       8px 10px;
-    background:    var(--body-bg);
-    color:         var(--body-text);
-    border:        1px solid var(--border);
-    border-radius: 8px;
+    flex:       1 1 auto;
+    resize:     vertical;
+    min-height: 52px;
+    padding:    9px 11px 4px;
+    border:     0;
+    background: transparent;
+    color:      var(--body-text);
+    font-size:  13px;
+    font-family: inherit;
 
-    &:focus { border-color: var(--link); outline: none; }
+    &:focus { outline: none; }
+    &::placeholder { color: var(--muted); }
   }
 
-  // What the box says about the command in it. The colour is on the box rather than on the
-  // text because a textarea cannot colour part of its own contents, and a real editor behind a
-  // transparent textarea is a large amount of machinery for one word.
-  &__input--known &__textarea,
-  &__input--known &__textarea:focus { border-color: var(--success); }
-
-  &__input--unknown &__textarea,
-  &__input--unknown &__textarea:focus { border-color: var(--warning); }
-
-  &__slash-hint {
-    flex:       0 0 auto;
-    padding:    4px 18px 0;
-    font-size:  11px;
-    color:      var(--muted);
-
-    &--known { color: var(--success); }
-    &--unknown { color: var(--warning); }
+  // The row along the bottom of the box: model, permissions, then the command menu and send.
+  &__bar {
+    display:     flex;
+    align-items: center;
+    gap:         2px;
+    padding:     3px 5px 5px;
   }
 
-  // The typeahead. A list rather than a floating menu: the panel is narrow and often docked,
-  // and an absolutely-positioned menu in here escapes the drawer on a phone.
+  &__bar-gap { flex: 1 1 auto; }
+
+  // Quiet text, not a chip. It reads as a label until it is wanted, which is what keeps four
+  // controls from competing with the message being written.
+  &__pill {
+    display:       flex;
+    align-items:   center;
+    gap:           4px;
+    max-width:     40%;
+    padding:       3px 7px;
+    border:        0;
+    border-radius: 6px;
+    background:    transparent;
+    color:         var(--muted);
+    font-size:     11px;
+    font-family:   inherit;
+    white-space:   nowrap;
+    overflow:      hidden;
+    text-overflow: ellipsis;
+    cursor:        pointer;
+
+    &:hover:not(:disabled), &--on {
+      background: color-mix(in srgb, var(--body-text) 8%, transparent);
+      color:      var(--body-text);
+    }
+
+    &:disabled { opacity: 0.5; cursor: default; }
+
+    // The command menu. A bare "/" is punctuation until it has an edge, and it belongs beside
+    // send rather than adrift between the gap and it.
+    &--icon {
+      justify-content: center;
+      width:           26px;
+      height:          26px;
+      margin-right:    4px;
+      padding:         0;
+      border:          1px solid var(--border);
+      font-family:     var(--mc-terminal-font, monospace);
+      font-size:       13px;
+      line-height:     1;
+
+      &:hover { border-color: var(--link); }
+    }
+  }
+
+  &__chev { flex: 0 0 auto; opacity: 0.8; }
+
+  // ── The command menu ──
+  // A list rather than a floating popup: the panel is narrow and often docked, and an
+  // absolutely-positioned menu in here escapes the drawer on a phone. Same metrics as the
+  // picker below, because they are the same kind of list opened from the same box.
   &__slash {
     flex:          0 0 auto;
-    margin:        0 18px;
-    padding:       4px;
+    // Sits on the box: same gutter, no daylight, square where the two meet.
+    margin:        0 18px -1px;
+    padding:       3px;
     list-style:    none;
     max-height:    40vh;
     overflow:      auto;
     border:        1px solid var(--border);
-    border-radius: 8px;
+    border-bottom: 0;
+    border-radius: 10px 10px 0 0;
     background:    var(--body-bg);
+
+    li { list-style: none; }
   }
 
   &__slash-item {
     display:       flex;
-    gap:           8px;
+    gap:           6px;
     align-items:   baseline;
     width:         100%;
-    padding:       6px 8px;
-    border:        none;
+    padding:       4px 8px;
+    border:        0;
     border-radius: 6px;
     background:    transparent;
     color:         var(--body-text);
+    font-size:     12px;
+    font-family:   inherit;
     text-align:    left;
     cursor:        pointer;
 
-    &--on { background: color-mix(in srgb, var(--link) 16%, transparent); }
+    &:hover, &--on { background: color-mix(in srgb, var(--link) 14%, transparent); }
   }
 
   &__slash-name {
@@ -2154,59 +2256,143 @@ export default {
     text-transform: uppercase;
   }
 
-  // ── What this conversation is set to ──
-  &__opts {
-    flex:       0 0 auto;
-    display:    flex;
-    flex-wrap:  wrap;
-    gap:        6px;
-    padding:    6px 18px 0;
+  &__slash-hint {
+    flex:      0 0 auto;
+    padding:   4px 18px 0;
+    font-size: 11px;
+    color:     var(--muted);
+
+    &--known { color: var(--success); }
+    &--unknown { color: var(--warning); }
   }
 
-  &__opt {
-    display:       flex;
-    align-items:   baseline;
-    gap:           5px;
-    padding:       2px 8px;
+  // Whichever menu is open, the box below it loses its top corners so the two read as one.
+  &__slash + &__box,
+  &__slash-hint + &__box {
+    margin-top:              0;
+    border-top-left-radius:  0;
+    border-top-right-radius: 0;
+  }
+
+  // ── The pickers ──
+  &__menu {
+    flex:          0 0 auto;
+    // Zero bottom margin and the box's own top margin removed below: the picker is opened
+    // from the box and belongs to it, and 6px of daylight between them read as two panels.
+    margin:        0 18px -1px;
+    padding:       3px;
     border:        1px solid var(--border);
-    border-radius: 999px;
-    background:    transparent;
-    color:         var(--body-text);
-    font-size:     11px;
-    cursor:        pointer;
-
-    &:hover:not(:disabled) { border-color: var(--link); }
-    &:disabled { opacity: 0.6; cursor: default; }
-
-    &--on {
-      border-color: var(--link);
-      background:   color-mix(in srgb, var(--link) 12%, transparent);
-    }
+    border-bottom: 0;
+    border-radius: 10px 10px 0 0;
+    background:    var(--body-bg);
+    max-height:    46vh;
+    overflow:      auto;
   }
 
-  &__opt-label {
+  // The box loses its top corners while a menu is sitting on it.
+  &__menu + &__box {
+    margin-top:                 0;
+    border-top-left-radius:     0;
+    border-top-right-radius:    0;
+  }
+
+  &__menu-head {
+    display:        flex;
+    align-items:    baseline;
+    gap:            6px;
+    margin:         5px 0 1px;
+    padding:        0 8px;
     color:          var(--muted);
     font-size:      10px;
-    letter-spacing: 0.04em;
+    letter-spacing: 0.06em;
     text-transform: uppercase;
   }
 
-  &__opt-value {
-    font-family: var(--mc-terminal-font, monospace);
-    font-weight: 600;
+  &__menu-note { text-transform: none; letter-spacing: 0; font-size: 10px; }
+
+  &__menu-item {
+    display:       flex;
+    align-items:   baseline;
+    gap:           6px;
+    width:         100%;
+    padding:       4px 8px;
+    border:        0;
+    border-radius: 6px;
+    background:    transparent;
+    color:         var(--body-text);
+    font-size:     12px;
+    font-family:   inherit;
+    text-align:    left;
+    cursor:        pointer;
+
+    &:hover { background: color-mix(in srgb, var(--link) 14%, transparent); }
+    &--on { color: var(--link); }
   }
 
-  &__opt-menu {
-    margin-top: 6px;
-
-    ul { list-style: none; margin: 0; padding: 0; }
-  }
-
-  &__opt-note {
-    margin:    0;
-    padding:   6px 8px;
-    color:     var(--muted);
+  &__menu-tick {
+    flex:      0 0 12px;
+    color:     var(--link);
     font-size: 11px;
+  }
+
+  &__menu-name { flex: 0 0 auto; }
+
+  &__menu-help {
+    flex:          1 1 auto;
+    min-width:     0;
+    color:         var(--muted);
+    font-size:     11px;
+    overflow:      hidden;
+    text-overflow: ellipsis;
+    white-space:   nowrap;
+  }
+
+  // Effort is a row of its own inside the model picker, because it is a property of the model
+  // rather than a second thing to choose - which is how claude's own picker has it.
+  &__efforts {
+    display:   flex;
+    flex-wrap: wrap;
+    gap:       4px;
+    padding:   2px 8px 6px;
+  }
+
+  &__effort {
+    padding:       3px 9px;
+    border:        1px solid var(--border);
+    border-radius: 999px;
+    background:    transparent;
+    color:         var(--muted);
+    font-size:     11px;
+    font-family:   inherit;
+    cursor:        pointer;
+
+    &:hover { border-color: var(--link); color: var(--body-text); }
+
+    &--on {
+      border-color: var(--link);
+      background:   color-mix(in srgb, var(--link) 16%, transparent);
+      color:        var(--body-text);
+    }
+  }
+
+  &__send {
+    flex:          0 0 auto;
+    display:       flex;
+    align-items:   center;
+    justify-content: center;
+    width:         26px;
+    height:        26px;
+    min-height:    0;
+    padding:       0;
+    border:        0;
+    border-radius: 6px;
+    background:    var(--link);
+    color:         var(--link-text, #fff);
+    font-size:     14px;
+    line-height:   1;
+    cursor:        pointer;
+
+    &:disabled { opacity: 0.35; cursor: default; }
   }
 
   &__mcp {
@@ -2237,26 +2423,7 @@ export default {
     white-space:   nowrap;
   }
 
-  &__mcp-detail {
-    flex:      0 0 auto;
-    color:     var(--muted);
-    font-size: 11px;
-  }
 
-  &__send {
-    flex:          0 0 auto;
-    min-height:    0;
-    height:        34px;
-    padding:       0 16px;
-    border-radius: 8px;
-    border:        1px solid var(--link);
-    background:    var(--link);
-    color:         var(--body-bg);
-    font-weight:   600;
-    cursor:        pointer;
-
-    &:disabled { opacity: 0.5; cursor: default; }
-  }
 }
 
 .mc-chat {
@@ -2398,27 +2565,26 @@ export default {
        timestamp at this width, and __meta already wraps. This keeps the wrap tidy. */
     &__meta { gap: 6px; }
 
-    &__slash { margin: 0 10px; }
-    &__opts { padding: 6px 10px 0; gap: 5px; }
-    // The label is the word that can go: the value is the fact, and the button is next to
-    // three others that say what it is.
-    &__opt-label { display: none; }
-    &__mcp-detail { display: none; }
+    /* The menus and the box share the page's gutter, which is 10px here rather than 18. */
+    &__slash,
+    &__menu { margin: 0 10px; }
+
     &__slash-help { display: none; }
     &__slash-hint { padding: 4px 10px 0; }
 
-    &__input {
-      gap:     6px;
-      padding: 6px 10px 10px;
-    }
+    &__box { margin: 6px 10px 10px; }
 
-    /* A thumb-sized target, and room for the two lines a message usually is on a phone. */
-    &__send {
-      height:  40px;
-      padding: 0 14px;
-    }
+    /* The controls stay on one row: two names, then the command menu and send. The model name
+       is the one that can be long, so it is the one that gets the room and the ellipsis. */
+    &__bar { padding: 2px 4px 4px; }
+    &__pill { max-width: 34%; }
 
-    &__textarea { min-height: 40px; }
+    /* Thumb-sized. 26px is right beside a 13px control on a desktop and too small to hit on
+       glass, and these two are the controls somebody uses on every message. */
+    &__send { width: 34px; height: 34px; font-size: 16px; }
+    &__pill--icon { padding: 6px 10px; font-size: 14px; }
+
+    &__textarea { min-height: 44px; padding: 8px 10px 2px; }
 
     &__status { padding: 4px 10px; }
 
