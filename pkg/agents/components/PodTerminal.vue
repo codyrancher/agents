@@ -1282,13 +1282,25 @@ export default {
     min-height: 0;
   }
 
+  /*
+   * The view toggle, over the top-right of the pane.
+   *
+   * It has a ground of its own now. On a touch screen there is no hover to reveal it, so it
+   * is simply always there - on top of the first line of whatever is being read, with the
+   * text showing through it. The chat's log clears it from below (see ChatPane's __log); this
+   * is the other half, so that anything which does end up behind it is still legible.
+   */
   &__tools {
-    position:   absolute;
-    top:        4px;
-    right:      14px;
-    z-index:    6;
-    display:    flex;
-    gap:        4px;
+    position:      absolute;
+    top:           4px;
+    right:         14px;
+    z-index:       6;
+    display:       flex;
+    gap:           4px;
+    padding:       2px;
+    border-radius: 8px;
+    background:    color-mix(in srgb, var(--terminal-bg, var(--body-bg)) 88%, transparent);
+    backdrop-filter: blur(3px);
     opacity:    0;
     transition: opacity 0.15s ease;
     pointer-events: none;
