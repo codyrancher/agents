@@ -2145,6 +2145,28 @@ export default {
     :deep(h3), :deep(h4), :deep(h5), :deep(h6) { margin: 8px 0 4px; font-size: 13px; }
     :deep(blockquote) { border-left: 3px solid var(--border); margin: 6px 0; padding-left: 10px; color: var(--muted); }
     :deep(a) { color: var(--link); }
+
+    // A table scrolls sideways in its own box: the chat is narrow and often docked, and a wide
+    // table must not widen the panel.
+    :deep(.mc-chat__table-wrap) {
+      max-width:   100%;
+      overflow-x:  auto;
+      margin:      6px 0;
+    }
+    :deep(table) {
+      border-collapse: collapse;
+      font-size:       12px;
+    }
+    :deep(th), :deep(td) {
+      border:      1px solid var(--border);
+      padding:     4px 8px;
+      text-align:  left;
+      white-space: nowrap;
+    }
+    :deep(th) {
+      background:   color-mix(in srgb, var(--body-text) 6%, transparent);
+      font-weight:  600;
+    }
   }
 
   // A path, wherever it is said: the thing a click opens.

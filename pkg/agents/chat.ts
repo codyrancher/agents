@@ -192,9 +192,43 @@ function inline(text: string): string {
   return out;
 }
 
+// A GitHub-style table: a header row, a delimiter row of dashes, then body rows. Detected by
+// the delimiter row, which is the only part whose shape is unambiguous - a plain paragraph can
+// hold a pipe, but only a table's second line is all dashes, colons and pipes.
+
+/** Split a table row into cells: drop the optional edge pipes, split on unescaped `|`. */
+function tableCells(line: string): string[] {
+  let s = line.trim();
+
+  if (s.startsWith('|')) {
+    s = s.slice(1);
+  }
+  if (s.endsWith('|') && !s.endsWith('\\|')) {
+    s = s.slice(0, -1);
+  }
+
+  return s.split(/(?<!\\)\|/).map((c) => c.replace(/\\\|/g, '|').trim());
+}
+
+/** The `|---|:--:|` row under a table's header: every cell is dashes, optionally colon-anchored. */
+function isDelimiterRow(line: string): boolean {
+  if (!line.includes('|') || !line.includes('-')) {
+    return false;
+  }
+
+  const cells = tableCells(line);
+
+  return cells.length > 0 && cells.every((c) => /^:?-+:?$/.test(c));
+}
+
+/** A table begins where a line with a pipe is followed by a delimiter row. */
+function isTableStart(lines: string[], i: number): boolean {
+  return i + 1 < lines.length && lines[i].includes('|') && isDelimiterRow(lines[i + 1]);
+}
+
 /**
- * Markdown to HTML: paragraphs, headings, fenced code, lists, blockquotes, inline code, bold,
- * italics and links. What claude writes in a reply; anything else stays as text.
+ * Markdown to HTML: paragraphs, headings, fenced code, lists, tables, blockquotes, inline code,
+ * bold, italics and links. What claude writes in a reply; anything else stays as text.
  */
 export function renderMarkdown(text: string): string {
   const lines = (text || '').replace(/\r/g, '').split('\n');
@@ -245,6 +279,33 @@ export function renderMarkdown(text: string): string {
       continue;
     }
 
+    if (isTableStart(lines, i)) {
+      const header = tableCells(line);
+      // A cell's alignment comes from where the colons sit in the delimiter row.
+      const aligns = tableCells(lines[i + 1]).map((c) => {
+        const left = c.startsWith(':');
+        const right = c.endsWith(':');
+
+        return left && right ? 'center' : right ? 'right' : left ? 'left' : '';
+      });
+
+      i += 2;
+      const rows: string[][] = [];
+
+      // Body rows run until a line without a pipe (a blank line or the next block).
+      while (i < lines.length && lines[i].trim() && lines[i].includes('|') && !/^\s*```/.test(lines[i])) {
+        rows.push(tableCells(lines[i++]));
+      }
+
+      const align = (idx: number) => (aligns[idx] ? ` style="text-align:${ aligns[idx] }"` : '');
+      const head = header.map((c, idx) => `<th${ align(idx) }>${ inline(c) }</th>`).join('');
+      const body = rows.map((r) => `<tr>${ header.map((_, idx) => `<td${ align(idx) }>${ inline(r[idx] || '') }</td>`).join('') }</tr>`).join('');
+
+      // Wrapped so a wide table scrolls in its own box rather than widening the chat panel.
+      out.push(`<div class="mc-chat__table-wrap"><table><thead><tr>${ head }</tr></thead><tbody>${ body }</tbody></table></div>`);
+      continue;
+    }
+
     if (/^\s*>\s?/.test(line)) {
       const quote: string[] = [];
 
@@ -262,7 +323,7 @@ export function renderMarkdown(text: string): string {
 
     const para: string[] = [];
 
-    while (i < lines.length && lines[i].trim() && !/^\s*```/.test(lines[i]) && !/^(#{1,6})\s+/.test(lines[i]) && !/^\s*([-*+]|\d+\.)\s+/.test(lines[i]) && !/^\s*>\s?/.test(lines[i])) {
+    while (i < lines.length && lines[i].trim() && !/^\s*```/.test(lines[i]) && !/^(#{1,6})\s+/.test(lines[i]) && !/^\s*([-*+]|\d+\.)\s+/.test(lines[i]) && !/^\s*>\s?/.test(lines[i]) && !isTableStart(lines, i)) {
       para.push(lines[i++]);
     }
     out.push(`<p>${ inline(para.join('\n')).replace(/\n/g, '<br>') }</p>`);
