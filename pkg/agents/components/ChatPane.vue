@@ -2377,26 +2377,35 @@ export default {
     &:disabled { opacity: 0.5; cursor: default; }
 
     // The command menu. A bare "/" is punctuation until it has an edge, and it belongs beside
-    // send rather than adrift between the gap and it. Sized from the same variables as send,
-    // because two square buttons side by side are the one place a pixel of difference shows.
+    // send rather than adrift between the gap and it. Its geometry is shared with send above.
     &--icon {
-      justify-content: center;
-      flex:            0 0 auto;
-      width:           var(--mc-chat-btn, 28px);
-      height:          var(--mc-chat-btn, 28px);
-      margin-right:    5px;
-      padding:         0;
-      border:          1px solid var(--border);
-      border-radius:   7px;
-      font-family:     var(--mc-terminal-font, monospace);
-      font-size:       13px;
-      line-height:     1;
+      margin-right: 5px;
+      border-color: var(--border);
+      font-family:  var(--mc-terminal-font, monospace);
+      font-size:    13px;
 
       &:hover { border-color: var(--link); }
     }
   }
 
   &__chev { flex: 0 0 auto; opacity: 0.8; }
+
+  // The pair at the right of the bar. One variable, one radius, one border width.
+  &__pill--icon,
+  &__send {
+    flex:            0 0 auto;
+    display:         flex;
+    align-items:     center;
+    justify-content: center;
+    width:           var(--mc-chat-btn, 30px);
+    height:          var(--mc-chat-btn, 30px);
+    min-height:      0;
+    padding:         0;
+    border-width:    1px;
+    border-style:    solid;
+    border-radius:   8px;
+    line-height:     1;
+  }
 
   /*
    * Rancher's stylesheet sizes every `button` on the page, and these are on its page.
@@ -2409,7 +2418,6 @@ export default {
    */
   button {
     min-height:  0;
-    height:      auto;
     margin:      0;
     line-height: 1.35;
     box-shadow:  none;
@@ -2635,24 +2643,14 @@ export default {
   }
 
   &__send {
-    flex:            0 0 auto;
-    display:         flex;
-    align-items:     center;
-    justify-content: center;
-    width:           var(--mc-chat-btn, 28px);
-    height:          var(--mc-chat-btn, 28px);
-    min-height:      0;
-    padding:         0;
-    // A transparent border rather than none, so the two buttons are the same box: a filled
-    // button beside an outlined one is a pixel narrower and a pixel shorter otherwise, and
-    // side by side that is the difference you can see without being able to name it.
-    border:          1px solid transparent;
-    border-radius:   7px;
-    background:      var(--link);
-    color:           var(--link-text, #fff);
-    font-size:       14px;
-    line-height:     1;
-    cursor:          pointer;
+    // A transparent border rather than none, so the two are the same box: a filled button
+    // beside an outlined one is a pixel narrower and shorter otherwise, and side by side that
+    // is the difference you can see without being able to name it.
+    border-color: transparent;
+    background:   var(--link);
+    color:        var(--link-text, #fff);
+    font-size:    15px;
+    cursor:       pointer;
 
     // Legible rather than ghostly: it is the control somebody is looking for.
     &:disabled {
@@ -2867,10 +2865,10 @@ export default {
     /* Thumb-sized. 26px is right beside a 13px control on a desktop and too small to hit on
        glass, and these two are the controls somebody uses on every message. */
     // Thumb-sized, and both from the same variable so they cannot drift apart.
-    --mc-chat-btn: 34px;
+    --mc-chat-btn: 36px;
 
-    &__send { font-size: 16px; }
-    &__pill--icon { font-size: 14px; }
+    &__send { font-size: 17px; }
+    &__pill--icon { font-size: 15px; }
     &__navbtn--caret { width: 34px; }
 
     &__textarea { min-height: 44px; padding: 8px 10px 2px; }
