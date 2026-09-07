@@ -205,10 +205,20 @@ export default {
           v-if="kind === 'file'"
           class="text-muted"
         >{{ sizeDisplay }}</span>
+        <!--
+          The mouse instructions and the zoom, split, because only one of them survives a
+          phone: "scroll to zoom, drag to pan, double-click to reset" is advice for a pointer
+          nobody holding a phone has, and at 390px it was pushing the close button off the
+          header and the path down to a single "/".
+        -->
         <span
           v-if="isImage"
           class="text-muted pfv__hint"
-        >scroll to zoom &middot; drag to pan &middot; double-click to reset &middot; {{ Math.round(scale * 100) }}%</span>
+        >scroll to zoom &middot; drag to pan &middot; double-click to reset</span>
+        <span
+          v-if="isImage"
+          class="text-muted pfv__zoom"
+        >{{ Math.round(scale * 100) }}%</span>
         <button
           class="btn role-tertiary btn-sm pfv__close"
           @click="$emit('close')"
@@ -320,18 +330,45 @@ export default {
   gap: 10px;
   padding: 10px 12px;
   border-bottom: 1px solid var(--border);
+  // Nothing in this row may push the close button out of the panel, which is what a header
+  // with one flexible child and three rigid ones will do as soon as one of them is a sentence.
+  min-width: 0;
 }
 
 .pfv__path {
-  flex: 1;
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.pfv__hint,
+.pfv__zoom {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
 .pfv__close {
   flex: none;
+  margin-left: auto;
+}
+
+@media (max-width: 760px) {
+  .pfv__head {
+    gap: 6px;
+    padding: 8px;
+  }
+
+  // Advice for a pointer, on a device that has none.
+  .pfv__hint { display: none; }
+
+  // The path is the only thing here that can give up room, and on a phone it is the tail of it
+  // that identifies the file, so it is the front that goes.
+  .pfv__path {
+    direction: rtl;
+    text-align: left;
+  }
 }
 
 .pfv__body {
