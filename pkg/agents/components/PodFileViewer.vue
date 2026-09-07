@@ -45,6 +45,11 @@ export default {
   },
 
   computed: {
+    /** The file's own name, which is what identifies it when there is no room for the path. */
+    baseName() {
+      return String(this.current || '').split('/').filter(Boolean).pop() || this.current;
+    },
+
     target() {
       return {
         pod: this.pod, container: this.container, namespace: this.namespace, home: this.home,
@@ -71,13 +76,6 @@ export default {
       const at = trimmed.lastIndexOf('/');
 
       return at > 0 ? trimmed.slice(0, at) : at === 0 ? '/' : '';
-    },
-    sizeDisplay() {
-      if (this.size < 1024) {
-        return `${ this.size } B`;
-      }
-
-      return this.size < 1024 * 1024 ? `${ Math.round(this.size / 1024) } KB` : `${ (this.size / 1024 / 1024).toFixed(1) } MB`;
     },
   },
 
@@ -200,11 +198,10 @@ export default {
         >
           <i class="icon icon-chevron-left" /> Up
         </button>
-        <code class="pfv__path">{{ current }}</code>
-        <span
-          v-if="kind === 'file'"
-          class="text-muted"
-        >{{ sizeDisplay }}</span>
+        <code
+          class="pfv__path"
+          :title="current"
+        ><span class="pfv__path-full">{{ current }}</span><span class="pfv__path-short">{{ baseName }}</span></code>
         <!--
           The mouse instructions and the zoom, split, because only one of them survives a
           phone: "scroll to zoom, drag to pan, double-click to reset" is advice for a pointer
@@ -354,6 +351,8 @@ export default {
   margin-left: auto;
 }
 
+.pfv__path-short { display: none; }
+
 @media (max-width: 760px) {
   .pfv__head {
     gap: 6px;
@@ -363,12 +362,16 @@ export default {
   // Advice for a pointer, on a device that has none.
   .pfv__hint { display: none; }
 
-  // The path is the only thing here that can give up room, and on a phone it is the tail of it
-  // that identifies the file, so it is the front that goes.
-  .pfv__path {
-    direction: rtl;
-    text-align: left;
-  }
+  /*
+   * The name rather than the path.
+   *
+   * The first version of this truncated the front with `direction: rtl`, which is bidi working
+   * correctly and not as wanted: the leading "/" is a neutral character, so it was reordered to
+   * the visual end and the header read "…pad/conv-closed.png/". The name is the part that
+   * identifies the file anyway, and the whole path is on the title.
+   */
+  .pfv__path-full { display: none; }
+  .pfv__path-short { display: inline; }
 }
 
 .pfv__body {
