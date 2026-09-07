@@ -30,6 +30,44 @@ function escapeText(text) {
 const POLL_MS = 1500;
 const CHUNK = 3000;
 
+/**
+ * Claude Code's own slash commands, for the ones that are not files anywhere.
+ *
+ * The custom half of the list is read out of the pod, which is authoritative: a project's
+ * commands and skills are files, and files can be listed. The built-in half cannot be - claude
+ * knows them, the filesystem does not - so it is written here, and that is why an unrecognised
+ * command is reported as "not one I know of" and never as invalid, and never blocks sending.
+ * This list going stale must cost a hint, not a message.
+ */
+const BUILTIN_COMMANDS = [
+  ['/add-dir', 'Add another working directory'],
+  ['/agents', 'Manage agent configurations'],
+  ['/clear', 'Clear the conversation history'],
+  ['/compact', 'Summarise the conversation so far'],
+  ['/config', 'Open the config panel'],
+  ['/context', 'Show what is in the context window'],
+  ['/cost', 'Token usage for this session'],
+  ['/doctor', 'Check the installation'],
+  ['/exit', 'Leave'],
+  ['/export', 'Export the conversation'],
+  ['/help', 'List the commands claude actually has'],
+  ['/hooks', 'Configure hooks'],
+  ['/init', 'Write a CLAUDE.md for this repository'],
+  ['/login', 'Sign in'],
+  ['/logout', 'Sign out'],
+  ['/mcp', 'MCP servers and their tools'],
+  ['/memory', 'Edit the memory files'],
+  ['/model', 'Choose the model'],
+  ['/permissions', 'Edit tool permissions'],
+  ['/resume', 'Resume an earlier conversation'],
+  ['/review', 'Review a pull request'],
+  ['/rewind', 'Go back to an earlier point'],
+  ['/status', 'Version, account and connectivity'],
+  ['/todos', 'The current todo list'],
+  ['/usage', 'Plan usage limits'],
+  ['/vim', 'Toggle vim mode'],
+].map(([name, help]) => ({ name, help, source: 'built-in' }));
+
 function b64(text) {
   const bytes = new TextEncoder().encode(text);
   let binary = '';
@@ -103,6 +141,22 @@ export default {
       // the list of them is open.
       tails:       {},
       showAgents:  false,
+      /**
+       * What has been sent from this box and is not in the transcript yet.
+       *
+       * Everything in the log comes from the transcript claude writes, and claude writes a user
+       * turn when it *starts* on it. So a message sent while it is working goes into its input
+       * queue and is written minutes later, or not until the current turn ends - and until then
+       * this view had cleared the box and shown nothing anywhere, which reads as the message
+       * having been dropped. These are held here and drawn at the end of the log, marked as
+       * queued, until the transcript catches up with them (see prunePending).
+       */
+      pending:     [],
+      // The commands this pane can be sent, and which one the typeahead has highlighted.
+      // Read once from the pod (see readCommands) and merged with the built-in list.
+      custom:      [],
+      slashIndex:  0,
+      slashDismissed: false,
     };
   },
 
@@ -150,7 +204,13 @@ export default {
     },
 
     shown() {
-      return this.view === 'main' ? this.messages : this.sub.messages;
+      if (this.view !== 'main') {
+        return this.sub.messages;
+      }
+
+      // Only on the main conversation: a message typed here goes to claude, never to one of
+      // the subagents whose transcript the tabs show.
+      return this.pending.length ? [...this.messages, ...this.pending] : this.messages;
     },
 
     /** The subagents with what each last said, the ones still writing first. */
@@ -175,10 +235,81 @@ export default {
       return this.shown.map((m) => ({
         ...m,
         html:      m.role === 'user' ? renderPlain(m.text) : linkPaths(renderMarkdown(m.text)),
+        queued:    !!m.queued,
         toolRows:  m.tools.map((t) => ({
           ...t, summary: toolSummary(t), summaryHtml: linkPaths(escapeText(toolSummary(t))),
         })),
       }));
+    },
+
+    /** Every command that could be typed here: claude's own, then this pod's own. */
+    commands() {
+      return [...BUILTIN_COMMANDS, ...this.custom];
+    },
+
+    /**
+     * The command being typed, if one is.
+     *
+     * Only when the slash opens the message, and only up to the first space: `/my-pr-review 42`
+     * is a command with an argument, and the argument is not part of the name. Everything else
+     * a message can contain - a path, a URL, a line of code - has a slash in it that is not in
+     * the first column, which is what keeps this out of the way of ordinary typing.
+     */
+    slashTyped() {
+      const match = /^\/([a-zA-Z0-9_:-]*)(\s?)/.exec(this.draft);
+
+      return match ? { name: `/${ match[1] }`, complete: !!match[2] } : null;
+    },
+
+    slashMatches() {
+      if (!this.slashTyped) {
+        return [];
+      }
+      const typed = this.slashTyped.name.toLowerCase();
+
+      return this.commands
+        .filter((c) => c.name.toLowerCase().startsWith(typed))
+        .slice(0, 8);
+    },
+
+    /** The menu is open while a name is still being typed and there is something to offer. */
+    slashOpen() {
+      return !!this.slashTyped && !this.slashTyped.complete && !this.slashDismissed && this.slashMatches.length > 0;
+    },
+
+    /**
+     * What the composer says about the command that has been typed.
+     *
+     * Three states and not two. `unknown` is deliberately not called invalid: the built-in half
+     * of the list is written down rather than read, so a command claude has and this does not
+     * know about lands here, and the message still sends.
+     */
+    slashState() {
+      if (!this.slashTyped || this.slashTyped.name === '/') {
+        return '';
+      }
+
+      const found = this.commands.find((c) => c.name.toLowerCase() === this.slashTyped.name.toLowerCase());
+
+      if (found) {
+        return 'known';
+      }
+
+      return this.slashTyped.complete || !this.slashMatches.length ? 'unknown' : 'partial';
+    },
+
+    slashHint() {
+      if (this.slashState === 'known') {
+        const found = this.commands.find((c) => c.name.toLowerCase() === this.slashTyped.name.toLowerCase());
+
+        return `${ found.name } — ${ found.help }`;
+      }
+
+      if (this.slashState === 'unknown') {
+        return `${ this.slashTyped.name } is not a command this knows about. It will be sent as typed.`;
+      }
+
+      return '';
     },
 
     canSend() {
@@ -190,8 +321,20 @@ export default {
     },
   },
 
+  watch: {
+    // A new name being typed starts the menu at the top again, and un-dismisses it: Escape
+    // hides the menu for the command being typed, not for the rest of the session.
+    draft(now, before) {
+      this.slashIndex = 0;
+      if (!now.startsWith('/') || now.slice(0, 1) !== before.slice(0, 1)) {
+        this.slashDismissed = false;
+      }
+    },
+  },
+
   mounted() {
     this.poll();
+    this.readCommands();
     this.timer = setInterval(() => this.poll(), POLL_MS);
   },
 
@@ -255,6 +398,9 @@ export default {
         ].join('\n'));
 
         this.absorb(out);
+        // After absorb, which is what moves the transcript on: a queued message is retired by
+        // the line claude has just written for it.
+        this.prunePending();
         this.error = '';
       } catch (e) {
         this.error = e.message || String(e);
@@ -437,6 +583,19 @@ export default {
           await this.start();
         }
         await this.say(text);
+        // Recorded before the poll rather than after it: the point of this is that there is
+        // never a moment where the box is empty and the log does not have it.
+        this.pending = [...this.pending, {
+          key: `pending-${ Date.now().toString(36) }-${ this.pending.length }`,
+          role: 'user',
+          text,
+          tools: [],
+          thinking: '',
+          images: [],
+          at: new Date().toISOString(),
+          queued: true,
+          sentAt: Date.now(),
+        }];
         this.draft = '';
         this.error = '';
       } catch (e) {
@@ -447,7 +606,123 @@ export default {
       }
     },
 
+    /**
+     * Drop the queued copies the transcript has now caught up with.
+     *
+     * Matched on the text, but only against user turns claude recorded at or after the moment
+     * the message was sent: matching on text alone would retire a queued message the first
+     * time the same words appeared anywhere in the conversation, and "yes" is said more than
+     * once. Each transcript line is spent on at most one queued message, so saying the same
+     * thing twice in a row retires one and leaves the other showing.
+     */
+    /**
+     * The commands that are files in this pod: the project's, the user's, and the skills.
+     *
+     * `.claude/commands/<name>.md` is a command called `/<name>`; a directory under it is a
+     * namespace, which claude spells `/<dir>:<name>`. A skill is invoked the same way by its
+     * directory name. Read once, at mount, because these change when somebody edits the tree
+     * and not while a message is being typed.
+     */
+    async readCommands() {
+      const script = [
+        'cd "$(dirname "$HOME")" 2>/dev/null || cd /',
+        'for root in "$HOME/.claude" ".claude" "$PWD/.claude"; do',
+        '  [ -d "$root/commands" ] && find "$root/commands" -name "*.md" -maxdepth 2 2>/dev/null | sed "s|^|CMD |"',
+        '  [ -d "$root/skills" ] && find "$root/skills" -maxdepth 2 -name SKILL.md 2>/dev/null | sed "s|^|SKILL |"',
+        'done',
+      ].join('\n');
+      const out = await this.run(script, 15000).catch(() => '');
+      const seen = new Set();
+      const found = [];
+
+      for (const line of String(out).split('\n')) {
+        const cmd = /^CMD (.*\/commands\/(.*)\.md)\s*$/.exec(line);
+        const skill = /^SKILL .*\/skills\/([^/]+)\/SKILL\.md\s*$/.exec(line);
+        const name = cmd ? `/${ cmd[2].replace(/\//g, ':') }` : (skill ? `/${ skill[1] }` : '');
+
+        if (!name || seen.has(name)) {
+          continue;
+        }
+        seen.add(name);
+        found.push({ name, help: cmd ? 'this pod\u2019s own command' : 'skill', source: cmd ? 'command' : 'skill' });
+      }
+
+      this.custom = found.sort((a, b) => a.name.localeCompare(b.name));
+    },
+
+    /** Put a command in the box, ready for its argument. */
+    pickCommand(command) {
+      const rest = this.draft.slice(this.slashTyped ? this.slashTyped.name.length : 0);
+
+      this.draft = `${ command.name }${ rest.startsWith(' ') ? rest : ` ${ rest }` }`.trimEnd();
+      this.draft = `${ this.draft } `.replace(/\s+$/, ' ');
+      this.slashIndex = 0;
+      this.$nextTick(() => this.$refs.box?.focus());
+    },
+
+    moveSlash(direction) {
+      const n = this.slashMatches.length;
+
+      this.slashIndex = n ? (this.slashIndex + direction + n) % n : 0;
+    },
+
+    prunePending() {
+      if (!this.pending.length) {
+        return;
+      }
+
+      // A pane with no claude in it has no queue to be waiting in, so nothing is pending.
+      if (this.pane.gone) {
+        this.pending = [];
+
+        return;
+      }
+
+      const said = this.messages
+        .filter((m) => m.role === 'user')
+        .map((m) => ({ text: (m.text || '').trim(), at: Date.parse(m.at || '') || 0 }));
+      const left = this.pending.filter((p) => {
+        // A second of slack: the transcript's clock is the pod's, this one is the browser's.
+        const i = said.findIndex((m) => m.text === p.text && m.at >= p.sentAt - 1000);
+
+        if (i < 0) {
+          return true;
+        }
+        said.splice(i, 1);
+
+        return false;
+      });
+
+      if (left.length !== this.pending.length) {
+        this.pending = left;
+      }
+    },
+
     onKeydown(event) {
+      // While the typeahead is open it owns the keys that move and choose. Enter picks the
+      // highlighted command rather than sending, which is the one place this changes what a
+      // key already did - and only while a menu is visibly open under the box.
+      if (this.slashOpen) {
+        if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+          event.preventDefault();
+          this.moveSlash(event.key === 'ArrowDown' ? 1 : -1);
+
+          return;
+        }
+        if (event.key === 'Tab' || (event.key === 'Enter' && !event.shiftKey && !event.isComposing)) {
+          event.preventDefault();
+          this.pickCommand(this.slashMatches[this.slashIndex] || this.slashMatches[0]);
+
+          return;
+        }
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          this.slashDismissed = true;
+
+          return;
+        }
+      }
+
       if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
         event.preventDefault();
         this.send();
@@ -825,11 +1100,21 @@ export default {
         v-for="m in rendered"
         :key="m.key"
         class="mc-chat__msg"
-        :class="`mc-chat__msg--${ m.role }`"
+        :class="[`mc-chat__msg--${ m.role }`, { 'mc-chat__msg--queued': m.queued }]"
       >
         <div class="mc-chat__meta">
           <span class="mc-chat__who">{{ m.role === 'user' ? 'You' : m.role === 'summary' ? 'Summary' : 'Claude' }}</span>
-          <span class="mc-chat__when">{{ when(m.at) }}</span>
+          <span class="mc-chat__when">{{ m.queued ? 'queued' : when(m.at) }}</span>
+          <!--
+            Said, rather than shown as an ordinary message, because it is not in the
+            conversation yet: claude is mid-turn and has this waiting in its input queue. It
+            turns into a normal message the moment the transcript records it.
+          -->
+          <span
+            v-if="m.queued"
+            class="mc-chat__queued-note"
+            :title="working ? 'Claude is working; this is next in its queue' : 'Waiting for claude to record this'"
+          >waiting for claude</span>
           <button
             v-if="m.role === 'summary'"
             type="button"
@@ -1053,12 +1338,50 @@ export default {
       <template v-else>{{ pane.status || 'Ready' }}</template>
     </div>
 
-    <div class="mc-chat__input">
+    <!--
+      The commands, while one is being typed. Above the box rather than below it, because the
+      box is already at the bottom of the panel and a menu under it would be off-screen.
+    -->
+    <ul
+      v-if="slashOpen"
+      class="mc-chat__slash"
+    >
+      <li
+        v-for="(c, i) in slashMatches"
+        :key="c.name"
+      >
+        <button
+          type="button"
+          class="mc-chat__slash-item"
+          :class="{ 'mc-chat__slash-item--on': i === slashIndex }"
+          @mouseenter="slashIndex = i"
+          @click="pickCommand(c)"
+        >
+          <span class="mc-chat__slash-name">{{ c.name }}</span>
+          <span class="mc-chat__slash-help">{{ c.help }}</span>
+          <span class="mc-chat__slash-source">{{ c.source }}</span>
+        </button>
+      </li>
+    </ul>
+
+    <div
+      v-if="slashHint"
+      class="mc-chat__slash-hint"
+      :class="`mc-chat__slash-hint--${ slashState }`"
+    >
+      {{ slashHint }}
+    </div>
+
+    <div
+      class="mc-chat__input"
+      :class="slashState ? `mc-chat__input--${ slashState }` : ''"
+    >
       <textarea
+        ref="box"
         v-model="draft"
         class="mc-chat__textarea"
         rows="3"
-        :placeholder="working ? 'Queue the next message (Enter to send, Shift+Enter for a new line, paste an image to attach it)' : 'Message (Enter to send, Shift+Enter for a new line, paste an image to attach it)'"
+        :placeholder="working ? 'Queue the next message (Enter to send, Shift+Enter for a new line, paste an image to attach it)' : 'Message (Enter to send, Shift+Enter for a new line, / for commands)'"
         @keydown="onKeydown"
         @paste="onPaste"
       />
@@ -1098,7 +1421,11 @@ export default {
 
   &__msg {
     position:      relative;
-    margin:        0 0 10px;
+    // A turn is separated from the next by more than the lines inside it are from each other,
+    // which is what makes a conversation readable as turns rather than as one column of boxes.
+    // It was 10px between messages and 10px of padding inside them, so the gap between two
+    // people talking measured the same as the gap between a heading and its own text.
+    margin:        0 0 14px;
     padding:       10px 14px 10px 16px;
     border-radius: 10px;
     max-width:     100%;
@@ -1114,13 +1441,30 @@ export default {
       background:   color-mix(in srgb, var(--body-text) 4%, transparent);
       border-color: color-mix(in srgb, var(--body-text) 9%, transparent);
     }
+
+    // Sent, but not in the transcript yet. A dashed edge rather than a faded message: it has
+    // to be legible - it is what the person just wrote - while still not claiming to be part
+    // of the conversation.
+    &--queued {
+      border-style: dashed;
+      border-color: color-mix(in srgb, var(--link) 45%, transparent);
+      background:   color-mix(in srgb, var(--link) 6%, transparent);
+    }
+  }
+
+  &__queued-note {
+    color:          var(--muted);
+    font-size:      10px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
   }
 
   &__meta {
     display:     flex;
+    flex-wrap:   wrap;
     gap:         8px;
     align-items: baseline;
-    margin:      0 0 4px;
+    margin:      0 0 6px;
   }
 
   &__who {
@@ -1435,6 +1779,79 @@ export default {
     &:focus { border-color: var(--link); outline: none; }
   }
 
+  // What the box says about the command in it. The colour is on the box rather than on the
+  // text because a textarea cannot colour part of its own contents, and a real editor behind a
+  // transparent textarea is a large amount of machinery for one word.
+  &__input--known &__textarea,
+  &__input--known &__textarea:focus { border-color: var(--success); }
+
+  &__input--unknown &__textarea,
+  &__input--unknown &__textarea:focus { border-color: var(--warning); }
+
+  &__slash-hint {
+    flex:       0 0 auto;
+    padding:    4px 18px 0;
+    font-size:  11px;
+    color:      var(--muted);
+
+    &--known { color: var(--success); }
+    &--unknown { color: var(--warning); }
+  }
+
+  // The typeahead. A list rather than a floating menu: the panel is narrow and often docked,
+  // and an absolutely-positioned menu in here escapes the drawer on a phone.
+  &__slash {
+    flex:          0 0 auto;
+    margin:        0 18px;
+    padding:       4px;
+    list-style:    none;
+    max-height:    40vh;
+    overflow:      auto;
+    border:        1px solid var(--border);
+    border-radius: 8px;
+    background:    var(--body-bg);
+  }
+
+  &__slash-item {
+    display:       flex;
+    gap:           8px;
+    align-items:   baseline;
+    width:         100%;
+    padding:       6px 8px;
+    border:        none;
+    border-radius: 6px;
+    background:    transparent;
+    color:         var(--body-text);
+    text-align:    left;
+    cursor:        pointer;
+
+    &--on { background: color-mix(in srgb, var(--link) 16%, transparent); }
+  }
+
+  &__slash-name {
+    flex:        0 0 auto;
+    font-family: var(--mc-terminal-font, monospace);
+    font-weight: 600;
+  }
+
+  &__slash-help {
+    flex:          1 1 auto;
+    min-width:     0;
+    color:         var(--muted);
+    font-size:     11px;
+    overflow:      hidden;
+    text-overflow: ellipsis;
+    white-space:   nowrap;
+  }
+
+  &__slash-source {
+    flex:           0 0 auto;
+    color:          var(--muted);
+    font-size:      10px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+
   &__send {
     flex:          0 0 auto;
     min-height:    0;
@@ -1560,6 +1977,78 @@ export default {
   }
 
   &__msg--found { box-shadow: 0 0 0 2px var(--link); }
+}
+
+/* ── Phones ──
+   760px, the breakpoint the rest of this extension already uses (PodTerminal's font switch,
+   and the Dev extension's whole mobile sheet).
+
+   What is wrong at this width is not the layout, which is a column and stays one. It is that
+   every horizontal measurement in here was chosen for a docked panel on a desktop: 18px of
+   padding either side of the log plus 16px inside each message plus a 36px indent on your own
+   messages spends 88px of a 390px screen on nothing, and the text that is left wraps every
+   four or five words. So the gutters come in, the indent becomes a hint rather than a margin,
+   and the vertical rhythm is kept - the room saved goes to the words. ── */
+@media (max-width: 760px) {
+  .mc-chat {
+    &__log { padding: 10px 10px 6px; }
+
+    &__msg {
+      margin:        0 0 12px;
+      padding:       9px 11px 9px 12px;
+      border-radius: 8px;
+    }
+
+    /* Enough to tell the two apart at a glance, which is all the indent was ever doing; the
+       colour and the "You" label do the rest. */
+    &__msg--user { margin-left: 14px; }
+
+    /* Three items on one line - who, when, and whether it is queued - do not fit beside a
+       timestamp at this width, and __meta already wraps. This keeps the wrap tidy. */
+    &__meta { gap: 6px; }
+
+    &__slash { margin: 0 10px; }
+    &__slash-help { display: none; }
+    &__slash-hint { padding: 4px 10px 0; }
+
+    &__input {
+      gap:     6px;
+      padding: 6px 10px 10px;
+    }
+
+    /* A thumb-sized target, and room for the two lines a message usually is on a phone. */
+    &__send {
+      height:  40px;
+      padding: 0 14px;
+    }
+
+    &__textarea { min-height: 40px; }
+
+    &__status { padding: 4px 10px; }
+
+    /* The subagent list: name, last words and time on one row is three columns in 370px. */
+    &__agents { padding: 0 10px; }
+
+    &__agent {
+      flex-wrap: wrap;
+      gap:       4px 8px;
+    }
+
+    &__agent-last {
+      flex-basis: 100%;
+      order:      3;
+    }
+
+    &__pick { padding: 6px 10px; }
+
+    /* A wide tool result or a code block scrolls in its own box rather than widening the
+       message, which on a phone widens the page. */
+    &__pre,
+    &__md pre {
+      max-width: 100%;
+      overflow-x: auto;
+    }
+  }
 }
 
 @keyframes mc-chat-pulse {
