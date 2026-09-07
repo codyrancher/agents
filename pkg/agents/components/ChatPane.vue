@@ -14,6 +14,9 @@
 import {
   parseTranscript, renderMarkdown, renderPlain, linkPaths, readPane, toolSummary, projectKey, agentsFrom
 } from '../chat';
+import {
+  modelAliases, flagChoices, parseMcpList, currentModel, isSafeOptionValue
+} from '../chat-options';
 import { podExecOnce, statPodPath, readPodFileBase64 } from '../pod';
 import { agentPod, sessionCommand } from '../agent';
 import PodFileViewer from './PodFileViewer.vue';
@@ -157,6 +160,24 @@ export default {
       custom:      [],
       slashIndex:  0,
       slashDismissed: false,
+      /**
+       * What claude here can be set to, read from claude rather than listed in this file.
+       *
+       * The menus offer the model, the effort level, the permission mode and the MCP servers -
+       * the things Claude Code's own UI changes mid-conversation. The values come out of
+       * `claude --help` in the pod (see chat-options.ts) because claude updates itself on its
+       * own schedule inside that pod, and a model alias written down in this component is
+       * wrong the first time a new one ships.
+       */
+      options:     {
+        read: false, models: [], efforts: [], modes: [], model: '', modelSource: '', effort: '',
+      },
+      mcp:         {
+        read: false, loading: false, servers: [], error: '',
+      },
+      // Which menu is open, and which one is mid-apply.
+      menu:        '',
+      optionBusy:  '',
     };
   },
 
@@ -335,6 +356,7 @@ export default {
   mounted() {
     this.poll();
     this.readCommands();
+    this.readOptions();
     this.timer = setInterval(() => this.poll(), POLL_MS);
   },
 
@@ -615,6 +637,153 @@ export default {
      * once. Each transcript line is spent on at most one queued message, so saying the same
      * thing twice in a row retires one and leaves the other showing.
      */
+    /**
+     * What claude in this pod can be set to, asked of claude itself.
+     *
+     * One exec for all of it: the help, which carries every value the menus offer; the pane's
+     * own argv, the environment and the two settings files, which between them decide which
+     * model is actually in force and why (claude's own precedence, see currentModel).
+     *
+     * Read once at mount and again after a change is applied. Not polled: `claude --help`
+     * shells out to the binary, and the poll that keeps the transcript current runs every
+     * 1.5 seconds.
+     */
+    async readOptions() {
+      const script = [
+        'echo @@HELP',
+        'claude --help 2>/dev/null',
+        'echo @@ARGV',
+        "ps -eo args= 2>/dev/null | grep -m1 '^claude' || true",
+        'echo @@ENV',
+        'printenv ANTHROPIC_MODEL 2>/dev/null || true',
+        'echo @@FILES',
+        // Two lines, always both, so a blank first line still means "settings.json sets none"
+        // rather than shifting ~/.claude.json's answer into its place.
+        `node -e 'const fs=require("fs");const g=(f,k)=>{try{return String(JSON.parse(fs.readFileSync(f,"utf8"))[k]||"")}catch(e){return ""}};const s=process.env.HOME+"/.claude/settings.json";const c=process.env.HOME+"/.claude.json";console.log(g(s,"model"));console.log(g(c,"model"));console.log(g(s,"effort")||g(s,"effortLevel"))' 2>/dev/null`,
+        'echo @@END',
+      ].join('\n');
+      const out = await this.run(script, 30000).catch(() => '');
+
+      if (!out.includes('@@HELP') || !out.includes('@@END')) {
+        return;
+      }
+
+      const between = (from, to) => (out.split(from)[1] || '').split(to)[0] || '';
+      const help = between('@@HELP', '@@ARGV');
+      const argv = between('@@ARGV', '@@ENV').split('\n').map((l) => l.trim()).find((l) => l.startsWith('claude')) || '';
+      const files = between('@@FILES', '@@END').split('\n');
+      const found = currentModel({
+        argv:     /--model[\s=]+(\S+)/.exec(argv)?.[1] || '',
+        env:      between('@@ENV', '@@FILES').trim(),
+        settings: files[1] || '',
+        config:   files[2] || '',
+      });
+
+      this.options = {
+        read:        true,
+        models:      modelAliases(help),
+        efforts:     flagChoices(help, '--effort'),
+        modes:       flagChoices(help, '--permission-mode'),
+        model:       found.model,
+        modelSource: found.source,
+        // Only if something recorded it. There is no flag to read the running session's effort
+        // back out of, so an unset one is shown as unset rather than guessed at.
+        effort:      (files[3] || '').trim(),
+      };
+    },
+
+    /** The MCP servers and whether each answered, read only when the menu is opened. */
+    async readMcp() {
+      this.mcp = { ...this.mcp, loading: true, error: '' };
+
+      try {
+        // `mcp list` health-checks every server, which is seconds rather than milliseconds.
+        const out = await this.run('claude mcp list 2>&1', 60000);
+
+        this.mcp = {
+          read: true, loading: false, servers: parseMcpList(out), error: '',
+        };
+      } catch (e) {
+        this.mcp = {
+          read: true, loading: false, servers: [], error: e.message || String(e),
+        };
+      }
+    },
+
+    toggleMenu(kind) {
+      this.menu = this.menu === kind ? '' : kind;
+
+      if (this.menu === 'mcp' && !this.mcp.read && !this.mcp.loading) {
+        this.readMcp();
+      }
+    },
+
+    /**
+     * Change one of them, by typing claude's own command into the pane.
+     *
+     * Through claude rather than by writing its settings file, because claude is running: the
+     * command changes the conversation that is open, and claude persists the choice itself
+     * where it persists one. A settings file written underneath a live session would be read
+     * by the next one and not by this one, which is the opposite of what the menu appears to
+     * promise.
+     *
+     * A command claude does not understand answers in the pane, in view, which is why this can
+     * offer what `--help` lists without also having to know which of them grew a slash command
+     * in which version.
+     */
+    async applyOption(kind, value) {
+      if (!isSafeOptionValue(value)) {
+        this.error = `${ value } is not a value this can send`;
+
+        return;
+      }
+
+      this.menu = '';
+      this.optionBusy = kind;
+
+      try {
+        if (!this.attached) {
+          await this.start();
+        }
+        await this.say(`/${ kind } ${ value }`);
+        this.error = '';
+        // Optimistic, then corrected by the re-read below: claude writes the model into its
+        // settings, so the answer that comes back is the real one a moment later.
+        this.options = { ...this.options, [kind]: value };
+        setTimeout(() => this.readOptions().catch(() => {}), 2500);
+      } catch (e) {
+        this.error = e.message || String(e);
+      } finally {
+        this.optionBusy = '';
+        this.poll();
+      }
+    },
+
+    /**
+     * Open one of claude's own managers in the pane.
+     *
+     * `/mcp` and `/permissions` are interactive in Claude Code too - they are pickers, not
+     * values - so this opens the real one rather than reimplementing it. Its prompt arrives
+     * through the same pane-dialog path this view already draws options for.
+     */
+    async openManager(command) {
+      this.menu = '';
+      this.optionBusy = command;
+
+      try {
+        if (!this.attached) {
+          await this.start();
+        }
+        await this.say(`/${ command }`);
+        this.error = '';
+      } catch (e) {
+        this.error = e.message || String(e);
+      } finally {
+        this.optionBusy = '';
+        this.poll();
+      }
+    },
+
     /**
      * The commands that are files in this pod: the project's, the user's, and the skills.
      *
@@ -1339,6 +1508,139 @@ export default {
     </div>
 
     <!--
+      What this conversation is set to, and the menus that change it.
+
+      Above the composer and below the log, which is where Claude Code's own status line puts
+      the same facts. Each button carries its current value so the bar answers the question
+      without being opened; the menus themselves are lists rather than native selects, because
+      a select cannot show which server is connected or where a model setting came from.
+    -->
+    <div
+      v-if="options.read"
+      class="mc-chat__opts"
+    >
+      <button
+        type="button"
+        class="mc-chat__opt"
+        :class="{ 'mc-chat__opt--on': menu === 'model' }"
+        :disabled="optionBusy === 'model'"
+        :title="options.modelSource ? `Model, set by ${ options.modelSource }` : 'Model'"
+        @click="toggleMenu('model')"
+      >
+        <span class="mc-chat__opt-label">model</span>
+        <span class="mc-chat__opt-value">{{ optionBusy === 'model' ? '…' : (options.model || 'default') }}</span>
+      </button>
+
+      <button
+        v-if="options.efforts.length"
+        type="button"
+        class="mc-chat__opt"
+        :class="{ 'mc-chat__opt--on': menu === 'effort' }"
+        :disabled="optionBusy === 'effort'"
+        title="Effort level for this session"
+        @click="toggleMenu('effort')"
+      >
+        <span class="mc-chat__opt-label">effort</span>
+        <span class="mc-chat__opt-value">{{ optionBusy === 'effort' ? '…' : (options.effort || 'default') }}</span>
+      </button>
+
+      <button
+        type="button"
+        class="mc-chat__opt"
+        :class="{ 'mc-chat__opt--on': menu === 'mcp' }"
+        title="MCP servers"
+        @click="toggleMenu('mcp')"
+      >
+        <span class="mc-chat__opt-label">mcp</span>
+        <span class="mc-chat__opt-value">{{ mcp.read ? `${ mcp.servers.filter((x) => x.ok).length }/${ mcp.servers.length }` : '…' }}</span>
+      </button>
+
+      <button
+        type="button"
+        class="mc-chat__opt"
+        :disabled="optionBusy === 'permissions'"
+        title="Open claude's permission manager in this pane"
+        @click="openManager('permissions')"
+      >
+        <span class="mc-chat__opt-label">permissions</span>
+      </button>
+    </div>
+
+    <!-- The open menu, drawn in the same place whichever it is. -->
+    <ul
+      v-if="menu === 'model' || menu === 'effort'"
+      class="mc-chat__slash mc-chat__opt-menu"
+    >
+      <li
+        v-for="value in (menu === 'model' ? options.models : options.efforts)"
+        :key="value"
+      >
+        <button
+          type="button"
+          class="mc-chat__slash-item"
+          :class="{ 'mc-chat__slash-item--on': value === options[menu] }"
+          @click="applyOption(menu, value)"
+        >
+          <span class="mc-chat__slash-name">{{ value }}</span>
+          <span
+            v-if="value === options[menu]"
+            class="mc-chat__slash-source"
+          >current{{ menu === 'model' && options.modelSource ? ` · ${ options.modelSource }` : '' }}</span>
+        </button>
+      </li>
+    </ul>
+
+    <div
+      v-else-if="menu === 'mcp'"
+      class="mc-chat__slash mc-chat__opt-menu"
+    >
+      <p
+        v-if="mcp.loading"
+        class="mc-chat__opt-note"
+      >
+        <i class="icon icon-spinner icon-spin" /> Checking the servers&hellip;
+      </p>
+      <p
+        v-else-if="mcp.error"
+        class="mc-chat__opt-note mc-chat__error"
+      >
+        {{ mcp.error }}
+      </p>
+      <p
+        v-else-if="!mcp.servers.length"
+        class="mc-chat__opt-note"
+      >
+        No MCP servers are configured in this pod.
+      </p>
+      <ul v-else>
+        <li
+          v-for="server in mcp.servers"
+          :key="server.name"
+          class="mc-chat__mcp"
+        >
+          <span
+            class="mc-chat__mcp-dot"
+            :class="server.ok ? 'mc-chat__mcp-dot--ok' : 'mc-chat__mcp-dot--bad'"
+          />
+          <span class="mc-chat__mcp-name">{{ server.name }}</span>
+          <span class="mc-chat__mcp-detail">{{ server.detail }}</span>
+        </li>
+      </ul>
+      <!--
+        Adding, removing and authorising a server is claude's own picker in Claude Code too, so
+        this opens the real one rather than drawing a worse copy of it.
+      -->
+      <button
+        type="button"
+        class="mc-chat__slash-item"
+        @click="openManager('mcp')"
+      >
+        <span class="mc-chat__slash-name">/mcp</span>
+        <span class="mc-chat__slash-help">open claude&rsquo;s MCP manager in this pane</span>
+      </button>
+    </div>
+
+    <!--
       The commands, while one is being typed. Above the box rather than below it, because the
       box is already at the bottom of the panel and a menu under it would be off-screen.
     -->
@@ -1852,6 +2154,95 @@ export default {
     text-transform: uppercase;
   }
 
+  // ── What this conversation is set to ──
+  &__opts {
+    flex:       0 0 auto;
+    display:    flex;
+    flex-wrap:  wrap;
+    gap:        6px;
+    padding:    6px 18px 0;
+  }
+
+  &__opt {
+    display:       flex;
+    align-items:   baseline;
+    gap:           5px;
+    padding:       2px 8px;
+    border:        1px solid var(--border);
+    border-radius: 999px;
+    background:    transparent;
+    color:         var(--body-text);
+    font-size:     11px;
+    cursor:        pointer;
+
+    &:hover:not(:disabled) { border-color: var(--link); }
+    &:disabled { opacity: 0.6; cursor: default; }
+
+    &--on {
+      border-color: var(--link);
+      background:   color-mix(in srgb, var(--link) 12%, transparent);
+    }
+  }
+
+  &__opt-label {
+    color:          var(--muted);
+    font-size:      10px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+
+  &__opt-value {
+    font-family: var(--mc-terminal-font, monospace);
+    font-weight: 600;
+  }
+
+  &__opt-menu {
+    margin-top: 6px;
+
+    ul { list-style: none; margin: 0; padding: 0; }
+  }
+
+  &__opt-note {
+    margin:    0;
+    padding:   6px 8px;
+    color:     var(--muted);
+    font-size: 11px;
+  }
+
+  &__mcp {
+    display:     flex;
+    gap:         8px;
+    align-items: baseline;
+    padding:     5px 8px;
+    font-size:   12px;
+  }
+
+  &__mcp-dot {
+    flex:          0 0 auto;
+    width:         7px;
+    height:        7px;
+    border-radius: 50%;
+    align-self:    center;
+    background:    var(--muted);
+
+    &--ok  { background: var(--success); }
+    &--bad { background: var(--error); }
+  }
+
+  &__mcp-name {
+    flex:          1 1 auto;
+    min-width:     0;
+    overflow:      hidden;
+    text-overflow: ellipsis;
+    white-space:   nowrap;
+  }
+
+  &__mcp-detail {
+    flex:      0 0 auto;
+    color:     var(--muted);
+    font-size: 11px;
+  }
+
   &__send {
     flex:          0 0 auto;
     min-height:    0;
@@ -2008,6 +2399,11 @@ export default {
     &__meta { gap: 6px; }
 
     &__slash { margin: 0 10px; }
+    &__opts { padding: 6px 10px 0; gap: 5px; }
+    // The label is the word that can go: the value is the fact, and the button is next to
+    // three others that say what it is.
+    &__opt-label { display: none; }
+    &__mcp-detail { display: none; }
     &__slash-help { display: none; }
     &__slash-hint { padding: 4px 10px 0; }
 

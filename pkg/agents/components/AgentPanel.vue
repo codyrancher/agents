@@ -95,6 +95,15 @@ const PLACEMENT_CHOICES = [
   { id: 'right', icon: 'dockRight', label: 'Dock right' },
 ];
 
+// Phone width, the breakpoint the rest of this extension uses (PodTerminal's font switch, the
+// chat's own spacing). One matchMedia for the component rather than a resize listener.
+const NARROW_PANEL = '(max-width: 760px)';
+const narrowQuery = typeof window !== 'undefined' && window.matchMedia ? window.matchMedia(NARROW_PANEL) : null;
+
+function isNarrowPanel() {
+  return !!narrowQuery?.matches;
+}
+
 export default {
   name: 'AgentPanel',
 
@@ -132,6 +141,17 @@ export default {
       // the same reason: a string ref inside v-for is an array whose order is not the list's.
       tabRefs:    {},
       renameRef:  null,
+      /**
+       * Whether the panel is phone-width, which decides whether the conversations are a row of
+       * tabs or a menu.
+       *
+       * 760px, the breakpoint the rest of this extension uses. This is a decision in
+       * JavaScript rather than a media query because it is not a style: a scrolling row of
+       * tabs does not become usable by being narrower, and on a screen this size the row costs
+       * a line of the chat to show two and a half names. Behind a menu, the pane is the panel.
+       */
+      narrow:     isNarrowPanel(),
+      onNarrow:   null,
     };
   },
 
@@ -204,6 +224,39 @@ export default {
         id: 'placement', label: 'Placement', choices: PLACEMENT_CHOICES, value: this.placement,
       }];
     },
+
+    activeSession() {
+      return this.sessions.find((session) => session.id === this.active) || null;
+    },
+
+    /**
+     * The conversations as a menu: the phone's version of the tab row.
+     *
+     * Everything the row can do is here, because the row is not rendered beside it - picking
+     * one, starting another, renaming and ending the one that is open. Rename and End name the
+     * conversation they act on rather than saying "this one", since the menu is closed by the
+     * time anything happens and a menu that acted on something unnamed is how the wrong
+     * conversation gets ended.
+     */
+    sessionMenuItems() {
+      const title = this.activeSession?.title || '';
+
+      return [
+        ...this.sessions.map((session) => ({
+          id:    `go:${ session.id }`,
+          label: session.title,
+          icon:  session.id === this.active ? 'check' : '',
+        })),
+        { id: 'divider', divider: true },
+        { id: 'new', label: 'Another conversation', icon: 'plus' },
+        {
+          id: 'rename', label: title ? `Rename ${ title }` : 'Rename', icon: 'edit', disabled: !this.active,
+        },
+        {
+          id: 'end', label: title ? `End ${ title }` : 'End', icon: 'close', danger: true, disabled: !this.active,
+        },
+      ];
+    },
   },
 
   /**
@@ -233,6 +286,13 @@ export default {
     if (readDrawerState().open) {
       this.setOpen(true);
     }
+
+    if (narrowQuery) {
+      this.onNarrow = (event) => {
+        this.narrow = event.matches;
+      };
+      narrowQuery.addEventListener('change', this.onNarrow);
+    }
   },
 
   beforeUnmount() {
@@ -242,6 +302,10 @@ export default {
 
     this.endGrab();
     window.removeEventListener('resize', this.clamp);
+
+    if (narrowQuery && this.onNarrow) {
+      narrowQuery.removeEventListener('change', this.onNarrow);
+    }
   },
 
   methods: {
@@ -288,6 +352,28 @@ export default {
     onMenu(id) {
       if (PLACEMENTS.includes(id)) {
         this.movePanel(id);
+      }
+    },
+
+    /** The conversations menu, which is the tab row on a phone. */
+    onSessionMenu(id) {
+      if (id.startsWith('go:')) {
+        this.select(id.slice(3));
+
+        return;
+      }
+      if (id === 'new') {
+        this.startNew();
+
+        return;
+      }
+      if (id === 'rename' && this.active) {
+        this.startRename(this.active);
+
+        return;
+      }
+      if (id === 'end' && this.active) {
+        this.closeSession(this.active);
       }
     },
 
@@ -641,10 +727,57 @@ export default {
 
     <div class="mc-agent__row">
       <!--
+        On a phone the conversations are a menu, not a row.
+
+        The row is a horizontal scroller: at 390px it shows two and a half names, costs a line
+        of the panel, and every one of its controls is a 12px glyph inside a tab that is itself
+        a scroll target. Behind one button the pane gets that line back, the names are readable
+        in full, and rename and end become entries somebody can hit. Everything the row does is
+        in sessionMenuItems, because the row is not rendered beside it.
+      -->
+      <template v-if="narrow">
+        <SMenu
+          :items="sessionMenuItems"
+          align="left"
+          aria-label="Conversations"
+          class="mc-agent__picker"
+          @select="onSessionMenu"
+        >
+          <template #trigger>
+            <span class="mc-agent__picker-title">{{ (activeSession && activeSession.title) || 'Conversations' }}</span>
+            <span
+              v-if="sessions.length > 1"
+              class="mc-agent__picker-count"
+            >{{ sessions.length }}</span>
+            <SIcon
+              name="chevronDown"
+              :size="12"
+            />
+          </template>
+        </SMenu>
+
+        <!--
+          The rename box, which on a phone has no tab to live in. Same handlers as the one in
+          the row, so Enter commits and Escape abandons exactly as it does there.
+        -->
+        <input
+          v-if="renaming"
+          :ref="(el) => { if (el) renameRef = el; }"
+          v-model="renaming.title"
+          class="mc-agent__rename mc-agent__rename--wide"
+          aria-label="Name this conversation"
+          @keydown.enter.prevent="commitRename"
+          @keydown.esc.prevent="renaming = null"
+          @blur="commitRename"
+        >
+      </template>
+
+      <!--
         Rancher's tab row. See the note at the top of this file for what it is and why it is
         not the component.
       -->
       <ul
+        v-else
         ref="tablist"
         role="tablist"
         class="tabs horizontal"
@@ -1069,6 +1202,49 @@ export default {
     background: var(--body-bg);
     color: var(--body-text);
     font-size: 13px;
+
+    // On a phone there is no row to keep inside, so the box takes the width it needs.
+    &--wide {
+      flex: 1 1 auto;
+      width: auto;
+      max-width: none;
+      margin: 4px 8px 4px 0;
+    }
+  }
+
+  // ── The conversations, as a menu (phone width) ──
+  &__picker {
+    flex: 0 1 auto;
+    min-width: 0;
+    margin: 2px 0;
+
+    :deep(button) {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      max-width: 100%;
+      // A thumb target, and the same height as the controls at the other end of the bar.
+      min-height: 32px;
+      padding: 0 8px;
+    }
+  }
+
+  &__picker-title {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 13px;
+  }
+
+  // How many there are, since the trigger only names the one that is open.
+  &__picker-count {
+    flex: 0 0 auto;
+    padding: 0 6px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--body-text) 10%, transparent);
+    color: var(--muted);
+    font-size: 11px;
   }
 
   &__note {
