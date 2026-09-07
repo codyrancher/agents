@@ -1926,6 +1926,15 @@ export default {
 
 <style lang="scss" scoped>
 .mc-chat {
+  /*
+   * The one inset every element that lines up with the prompt box is measured from.
+   *
+   * It was written out at each of them - the log, the menus, the action row, the box - and
+   * they drifted: the action row sat a gutter further in than the box it belongs to. One
+   * value, and they cannot.
+   */
+  --mc-chat-gutter: 18px;
+
   position:       relative;
   display:        flex;
   flex-direction: column;
@@ -1940,7 +1949,10 @@ export default {
   &__log {
     flex:       1 1 auto;
     overflow:   auto;
-    padding:    14px 18px 8px;
+    // The top inset clears the view toggle that floats over this corner (PodTerminal's
+    // __tools): on a touch screen there is no hover to hide it, so without this the first
+    // line of the conversation is read through a pair of buttons.
+    padding:    32px var(--mc-chat-gutter) 8px;
     min-height: 0;
   }
 
@@ -2260,6 +2272,11 @@ export default {
   &__code { display: flex; gap: 6px; }
   &__code input { height: 28px; font-size: 12px; padding: 0 8px; }
 
+  // Nothing in it is no line at all. It was holding a row's height open between the action
+  // row and the box whether or not it had anything to say, which is most of the gap that was
+  // there.
+  &__status:empty { display: none; padding: 0; }
+
   &__status {
     flex:        0 0 auto;
     padding:     4px 18px;
@@ -2292,9 +2309,9 @@ export default {
     flex:          0 0 auto;
     display:       flex;
     flex-direction: column;
-    margin:        6px 18px 12px;
+    margin:        0 var(--mc-chat-gutter) 12px;
     border:        1px solid var(--border);
-    border-radius: 10px;
+    border-radius: 8px;
     background:    var(--body-bg);
     transition:    border-color 0.12s ease;
 
@@ -2381,7 +2398,7 @@ export default {
     padding:         0;
     border-width:    1px;
     border-style:    solid;
-    border-radius:   8px;
+    border-radius:   6px;
     line-height:     1;
   }
 
@@ -2408,14 +2425,14 @@ export default {
   &__slash {
     flex:          0 0 auto;
     // Sits on the box: same gutter, no daylight, square where the two meet.
-    margin:        0 18px -1px;
+    margin:        0 var(--mc-chat-gutter) -1px;
     padding:       3px;
     list-style:    none;
     max-height:    40vh;
     overflow:      auto;
     border:        1px solid var(--border);
     border-bottom: 0;
-    border-radius: 10px 10px 0 0;
+    border-radius: 8px 8px 0 0;
     background:    var(--body-bg);
 
     li { list-style: none; }
@@ -2523,11 +2540,11 @@ export default {
     flex:          0 0 auto;
     // Zero bottom margin and the box's own top margin removed below: the picker is opened
     // from the box and belongs to it, and 6px of daylight between them read as two panels.
-    margin:        0 18px -1px;
+    margin:        0 var(--mc-chat-gutter) -1px;
     padding:       3px;
     border:        1px solid var(--border);
     border-bottom: 0;
-    border-radius: 10px 10px 0 0;
+    border-radius: 8px 8px 0 0;
     background:    var(--body-bg);
     max-height:    46vh;
     overflow:      auto;
@@ -2767,7 +2784,13 @@ export default {
     // Enough to read as two pairs rather than four buttons, and the same step the prompt box's
     // own controls use.
     gap:             5px;
-    padding:         2px 18px 0;
+    // Flush with the box below: the arrows sit over its left edge and the log controls over
+    // its right, so the row reads as belonging to it rather than hovering near it. The bottom
+    // padding is the gap between the two, which there was none of.
+    // The gap under the row is the gutter beside it: the buttons sit the same distance from
+    // the box as they do from the edges of the page, which is the only spacing here that does
+    // not need a reason.
+    padding:         2px var(--mc-chat-gutter) var(--mc-chat-gutter);
   }
 
   // Everything after the caret keys goes to the right; they stay at the left.
@@ -2794,7 +2817,7 @@ export default {
     padding:         0 10px;
     font-size:       11px;
     line-height:     1;
-    border-radius:   8px;
+    border-radius:   6px;
     border:          1px solid var(--border);
     background:      var(--body-bg);
     color:           var(--muted);
@@ -2832,7 +2855,7 @@ export default {
    and the vertical rhythm is kept - the room saved goes to the words. ── */
 @media (max-width: 760px) {
   .mc-chat {
-    &__log { padding: 10px 10px 6px; }
+    &__log { padding: 30px var(--mc-chat-gutter) 6px; }
 
     &__msg {
       margin:        0 0 12px;
@@ -2849,15 +2872,12 @@ export default {
     &__meta { gap: 6px; }
 
     /* The menus and the box share the page's gutter, which is 10px here rather than 18. */
-    &__slash,
-    &__menu { margin: 0 10px; }
-
-    &__nav { padding: 2px 10px 0; }
+    --mc-chat-gutter: 10px;
 
     &__slash-help { display: none; }
     &__slash-hint { padding: 4px 10px 0; }
 
-    &__box { margin: 6px 10px 10px; }
+    &__box { margin: 0 var(--mc-chat-gutter) 10px; }
 
     /* The controls stay on one row: two names, then the command menu and send. The model name
        is the one that can be long, so it is the one that gets the room and the ellipsis. */
