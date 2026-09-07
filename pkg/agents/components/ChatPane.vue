@@ -1507,8 +1507,39 @@ export default {
       {{ notice }}
     </div>
 
-    <!-- Getting around: your messages one by one, and the bottom. -->
+    <!--
+      Getting around: the caret, your messages one by one, and the bottom.
+
+      The caret keys are here rather than on the composer's own row because this is the row of
+      things that move you around, and they are two more of those. The terminal's key bar -
+      Esc, Tab, Ctrl, home, end, word-delete - is for driving a TUI and is hidden in this view
+      (see PodTerminal); what a text box actually wants on a phone is a way to put the caret
+      back one character to fix a typo, which is these two and nothing else.
+
+      `@mousedown.prevent` is what makes them work at all: without it the box loses focus on
+      the press, the selection collapses, and the arrow moves a caret that is no longer there.
+    -->
     <div class="mc-chat__nav">
+      <template v-if="coarse">
+        <button
+          type="button"
+          class="mc-chat__navbtn mc-chat__navbtn--caret"
+          title="Move the cursor left"
+          @mousedown.prevent
+          @click="moveCaret(-1)"
+        >
+          &#8592;
+        </button>
+        <button
+          type="button"
+          class="mc-chat__navbtn mc-chat__navbtn--caret"
+          title="Move the cursor right"
+          @mousedown.prevent
+          @click="moveCaret(1)"
+        >
+          &#8594;
+        </button>
+      </template>
       <button
         type="button"
         class="mc-chat__navbtn"
@@ -1749,36 +1780,7 @@ export default {
         @focus="focused = true"
         @blur="focused = false"
       />
-      <!--
-        The two keys a phone keyboard does not give you for a text box.
-        
-        The terminal's own row - Esc, Tab, Ctrl, home, end, word-delete - is for driving a TUI
-        and means nothing here, so it is hidden in this view (see PodTerminal). What is left is
-        the one thing a thumb genuinely cannot do in a textarea: put the caret back one
-        character to fix a typo. Inside the box and on the same row as everything else, because
-        a second bar under the composer is what this replaces.
-      -->
       <div class="mc-chat__bar">
-        <template v-if="coarse">
-          <button
-            type="button"
-            class="mc-chat__pill mc-chat__pill--icon"
-            title="Move the cursor left"
-            @mousedown.prevent
-            @click="moveCaret(-1)"
-          >
-            &#8592;
-          </button>
-          <button
-            type="button"
-            class="mc-chat__pill mc-chat__pill--icon"
-            title="Move the cursor right"
-            @mousedown.prevent
-            @click="moveCaret(1)"
-          >
-            &#8594;
-          </button>
-        </template>
         <!-- The model, and the effort level, which the picker carries as a row of its own. -->
         <button
           v-if="options.read"
@@ -2298,14 +2300,17 @@ export default {
     &:disabled { opacity: 0.5; cursor: default; }
 
     // The command menu. A bare "/" is punctuation until it has an edge, and it belongs beside
-    // send rather than adrift between the gap and it.
+    // send rather than adrift between the gap and it. Sized from the same variables as send,
+    // because two square buttons side by side are the one place a pixel of difference shows.
     &--icon {
       justify-content: center;
-      width:           26px;
-      height:          26px;
-      margin-right:    4px;
+      flex:            0 0 auto;
+      width:           var(--mc-chat-btn, 28px);
+      height:          var(--mc-chat-btn, 28px);
+      margin-right:    5px;
       padding:         0;
       border:          1px solid var(--border);
+      border-radius:   7px;
       font-family:     var(--mc-terminal-font, monospace);
       font-size:       13px;
       line-height:     1;
@@ -2393,6 +2398,14 @@ export default {
     font-size:      10px;
     letter-spacing: 0.04em;
     text-transform: uppercase;
+  }
+
+  // The caret keys sit in the nav row and are square where the others are words.
+  &__navbtn--caret {
+    width:           26px;
+    padding:         0;
+    justify-content: center;
+    text-align:      center;
   }
 
   &__slash-hint {
@@ -2516,23 +2529,31 @@ export default {
   }
 
   &__send {
-    flex:          0 0 auto;
-    display:       flex;
-    align-items:   center;
+    flex:            0 0 auto;
+    display:         flex;
+    align-items:     center;
     justify-content: center;
-    width:         26px;
-    height:        26px;
-    min-height:    0;
-    padding:       0;
-    border:        0;
-    border-radius: 6px;
-    background:    var(--link);
-    color:         var(--link-text, #fff);
-    font-size:     14px;
-    line-height:   1;
-    cursor:        pointer;
+    width:           var(--mc-chat-btn, 28px);
+    height:          var(--mc-chat-btn, 28px);
+    min-height:      0;
+    padding:         0;
+    // A transparent border rather than none, so the two buttons are the same box: a filled
+    // button beside an outlined one is a pixel narrower and a pixel shorter otherwise, and
+    // side by side that is the difference you can see without being able to name it.
+    border:          1px solid transparent;
+    border-radius:   7px;
+    background:      var(--link);
+    color:           var(--link-text, #fff);
+    font-size:       14px;
+    line-height:     1;
+    cursor:          pointer;
 
-    &:disabled { opacity: 0.35; cursor: default; }
+    // Legible rather than ghostly: it is the control somebody is looking for.
+    &:disabled {
+      background: color-mix(in srgb, var(--link) 30%, transparent);
+      color:      color-mix(in srgb, var(--link-text, #fff) 70%, transparent);
+      cursor:     default;
+    }
   }
 
   &__mcp {
@@ -2721,8 +2742,12 @@ export default {
 
     /* Thumb-sized. 26px is right beside a 13px control on a desktop and too small to hit on
        glass, and these two are the controls somebody uses on every message. */
-    &__send { width: 34px; height: 34px; font-size: 16px; }
-    &__pill--icon { padding: 6px 10px; font-size: 14px; }
+    // Thumb-sized, and both from the same variable so they cannot drift apart.
+    --mc-chat-btn: 34px;
+
+    &__send { font-size: 16px; }
+    &__pill--icon { font-size: 14px; }
+    &__navbtn--caret { width: 34px; }
 
     &__textarea { min-height: 44px; padding: 8px 10px 2px; }
 

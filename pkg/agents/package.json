@@ -1,7 +1,7 @@
 {
   "name": "agents",
   "description": "The terminal, the agent pod and its conversations, offered to every extension in this Rancher",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "private": false,
   "icon": "https://codyrancher.github.io/agents/icon.svg",
   "homepage": "https://github.com/codyrancher/agents",
