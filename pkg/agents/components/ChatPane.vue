@@ -21,17 +21,6 @@ import { podExecOnce, statPodPath, readPodFileBase64 } from '../pod';
 import { agentPod, sessionCommand } from '../agent';
 import PodFileViewer from './PodFileViewer.vue';
 
-/**
- * The disclosure chevron on the prompt box's own controls.
- *
- * Inline SVG rather than Rancher's icon font: these buttons are 11px text and the font's
- * chevron is drawn for a 16px control, so it sat a pixel low and a shade too heavy beside
- * them. Six lines of SVG scales with the text and needs no stylesheet to have loaded.
- */
-const SChevron = {
-  name:     'SChevron',
-  template: `<svg class="mc-chat__chev" width="8" height="8" viewBox="0 0 8 8" aria-hidden="true"><path d="M1 2.5 L4 5.5 L7 2.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
-};
 
 const THUMB_MAX = 400_000;
 const MIME = {
@@ -97,7 +86,7 @@ function b64(text) {
 export default {
   name: 'ChatPane',
 
-  components: { PodFileViewer, SChevron },
+  components: { PodFileViewer },
 
   props: {
     session:   { type: String, default: 'agent-1' },
@@ -191,6 +180,16 @@ export default {
       menu:        '',
       optionBusy:  '',
       focused:     false,
+      // A touch screen, which is the only place the caret keys below are worth the room.
+      coarse:      typeof window !== 'undefined' && !!window.matchMedia?.('(pointer: coarse)').matches,
+      /**
+       * Images being written into the pod, whose paths are already in the box.
+       *
+       * Pasting puts the path in immediately and uploads behind it, so this is the only thing
+       * that still has to be waited for - and only at Send, and only if it has not finished by
+       * then. Typing the rest of the message usually outlasts the upload.
+       */
+      uploads:     [],
     };
   },
 
@@ -633,6 +632,13 @@ export default {
 
       this.sending = true;
       try {
+        // The paths are in the message; the bytes may still be going. Waited for here rather
+        // than at the paste, which is the whole point: an upload that finished while the
+        // sentence was being typed costs nothing at all.
+        if (this.uploads.length) {
+          this.pasting = `Finishing ${ this.uploads.length === 1 ? 'an attachment' : `${ this.uploads.length } attachments` }`;
+          await Promise.all(this.uploads);
+        }
         if (!this.attached) {
           await this.start();
         }
@@ -742,6 +748,25 @@ export default {
           read: true, loading: false, servers: [], error: e.message || String(e),
         };
       }
+    },
+
+    /**
+     * Move the caret in the message box, which a thumb cannot do.
+     *
+     * `@mousedown.prevent` on the button is what makes it work at all: without it the box loses
+     * focus on the press, the selection collapses, and the arrow moves a caret that is no
+     * longer anywhere.
+     */
+    moveCaret(by) {
+      const box = this.$refs.box;
+
+      if (!box) {
+        return;
+      }
+      const at = Math.max(0, Math.min(box.value.length, (box.selectionStart ?? 0) + by));
+
+      box.focus();
+      box.setSelectionRange(at, at);
     },
 
     /** The `/` button: the command menu, opened the way typing a slash opens it. */
@@ -1152,73 +1177,115 @@ export default {
     },
 
     /** An image pasted or dropped: into the pod beside the pane, its path into the draft. */
-    async onPaste(event) {
+    onPaste(event) {
       const items = [...(event.clipboardData?.items || [])].filter((i) => i.kind === 'file' && i.type.startsWith('image/'));
 
       if (!items.length) {
         return;
       }
       event.preventDefault();
-      for (const item of items) {
-        await this.attachImage(item.getAsFile());
-      }
+      items.forEach((item) => this.attachImage(item.getAsFile()));
     },
 
-    async onDrop(event) {
+    onDrop(event) {
       const files = [...(event.dataTransfer?.files || [])].filter((f) => f.type.startsWith('image/'));
 
       if (!files.length) {
         return;
       }
       event.preventDefault();
-      for (const file of files) {
-        await this.attachImage(file);
-      }
+      files.forEach((file) => this.attachImage(file));
     },
 
-    async attachImage(file) {
+    /**
+     * Attach an image: the path goes in the box now, the bytes go to the pod behind it.
+     *
+     * The path is decided here rather than after the upload, which is what makes this
+     * possible - it is a timestamp and an extension, both known the moment the file arrives.
+     * So pasting a screenshot puts `/workspace/.images/2026-…png ` in the box immediately and
+     * you carry on typing the sentence around it; a 2MB screenshot is two hundred execs and
+     * there is no reason to watch them.
+     *
+     * The upload is registered in `uploads`, and `send()` waits on those and only those - so
+     * the wait happens once, at the point it actually matters, and only if the upload has not
+     * finished by then. It usually has, because typing the rest of the message takes longer.
+     */
+    attachImage(file) {
       if (!file) {
-        return;
+        return Promise.resolve();
       }
-      this.pasting = 'Putting the image in the pod';
-      try {
-        const { bytes, extension } = await this.shrink(file);
-        const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-        const path = `${ this.imageDir }/${ stamp }.${ extension }`;
-        let binary = '';
 
-        for (let i = 0; i < bytes.length; i += 8192) {
-          binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
-        }
-        const encoded = btoa(binary);
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const original = (file.type.split('/')[1] || 'png').replace(/[^a-z0-9]/g, '');
+      // Naming the file before the bytes have been read means predicting what shrink will do
+      // with them, so the decision moves here and shrink is told rather than asked. Only the
+      // rare failure below can make this wrong, and it repairs itself.
+      const converting = file.size >= 150_000 && typeof createImageBitmap === 'function';
+      let path = `${ this.imageDir }/${ stamp }.${ converting ? 'jpg' : original }`;
 
-        await this.run(`mkdir -p "$(dirname '${ path }')" && : > '${ path }.b64'`);
-        for (let i = 0; i < encoded.length; i += CHUNK) {
-          this.pasting = `Putting the image in the pod (${ Math.round((i / encoded.length) * 100) }%)`;
-          await this.run(`printf %s '${ encoded.slice(i, i + CHUNK) }' >> '${ path }.b64'`);
-        }
-        const out = await this.run(`base64 -d '${ path }.b64' > '${ path }' && rm -f '${ path }.b64' && wc -c < '${ path }'`);
+      // In the box before a byte has moved.
+      this.draft = `${ this.draft }${ this.draft && !this.draft.endsWith(' ') ? ' ' : '' }${ path } `;
 
-        if (!parseInt(out.trim(), 10)) {
-          throw new Error(`the image did not land in ${ this.label }`);
+      const upload = (async() => {
+        try {
+          const { bytes, extension } = await this.shrink(file, converting);
+
+          // The conversion was meant to happen and could not - a decoder that threw, or a JPEG
+          // that came out bigger than the PNG. The name is already in somebody's message, so
+          // the name is what moves: the file is written under its true extension and the text
+          // is corrected in place.
+          if (extension !== path.split('.').pop()) {
+            const corrected = path.replace(/\.[^.]+$/, `.${ extension }`);
+
+            this.draft = this.draft.split(path).join(corrected);
+            path = corrected;
+          }
+          let binary = '';
+
+          for (let i = 0; i < bytes.length; i += 8192) {
+            binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
+          }
+          const encoded = btoa(binary);
+
+          await this.run(`mkdir -p "$(dirname '${ path }')" && : > '${ path }.b64'`);
+          for (let i = 0; i < encoded.length; i += CHUNK) {
+            this.pasting = `Attaching the image (${ Math.round((i / encoded.length) * 100) }%)`;
+            await this.run(`printf %s '${ encoded.slice(i, i + CHUNK) }' >> '${ path }.b64'`);
+          }
+          const out = await this.run(`base64 -d '${ path }.b64' > '${ path }' && rm -f '${ path }.b64' && wc -c < '${ path }'`);
+
+          if (!parseInt(out.trim(), 10)) {
+            throw new Error(`the image did not land in ${ this.label }`);
+          }
+        } catch (e) {
+          // Said, and not silently: the path is already in the message, so a failure here is a
+          // message about to be sent that names a file which is not there.
+          this.error = `${ path } could not be attached: ${ e.message || e }`;
+        } finally {
+          this.uploads = this.uploads.filter((u) => u !== upload);
+          if (!this.uploads.length) {
+            this.pasting = '';
+          }
         }
-        this.draft = `${ this.draft }${ this.draft && !this.draft.endsWith(' ') ? ' ' : '' }${ path } `;
-        this.pasting = '';
-      } catch (e) {
-        this.pasting = '';
-        this.error = e.message || String(e);
-      }
+      })();
+
+      this.uploads = [...this.uploads, upload];
+
+      return upload;
     },
 
     /**
      * A screenshot as a JPEG when it is big: every chunk of it is an exec, and a 2 MB PNG of a
      * dashboard is two hundred of them. The model reads a JPEG just as well.
      */
-    async shrink(file) {
+    async shrink(file, converting) {
       const original = new Uint8Array(await file.arrayBuffer());
       const extension = (file.type.split('/')[1] || 'png').replace(/[^a-z0-9]/g, '');
 
-      if (original.length < 150_000 || typeof createImageBitmap !== 'function') {
+      // Whether to convert is the caller's decision now, not this one's: the caller has already
+      // named the file, and a function that decided the format after the name was chosen is a
+      // function that could rename it underneath somebody's message.
+      if (!converting) {
         return { bytes: original, extension };
       }
       try {
@@ -1682,7 +1749,36 @@ export default {
         @focus="focused = true"
         @blur="focused = false"
       />
+      <!--
+        The two keys a phone keyboard does not give you for a text box.
+        
+        The terminal's own row - Esc, Tab, Ctrl, home, end, word-delete - is for driving a TUI
+        and means nothing here, so it is hidden in this view (see PodTerminal). What is left is
+        the one thing a thumb genuinely cannot do in a textarea: put the caret back one
+        character to fix a typo. Inside the box and on the same row as everything else, because
+        a second bar under the composer is what this replaces.
+      -->
       <div class="mc-chat__bar">
+        <template v-if="coarse">
+          <button
+            type="button"
+            class="mc-chat__pill mc-chat__pill--icon"
+            title="Move the cursor left"
+            @mousedown.prevent
+            @click="moveCaret(-1)"
+          >
+            &#8592;
+          </button>
+          <button
+            type="button"
+            class="mc-chat__pill mc-chat__pill--icon"
+            title="Move the cursor right"
+            @mousedown.prevent
+            @click="moveCaret(1)"
+          >
+            &#8594;
+          </button>
+        </template>
         <!-- The model, and the effort level, which the picker carries as a row of its own. -->
         <button
           v-if="options.read"
@@ -1694,7 +1790,20 @@ export default {
           @click="toggleMenu('model')"
         >
           {{ optionBusy === 'model' || optionBusy === 'effort' ? '…' : (options.model || 'model') }}<template v-if="options.effort"> · {{ options.effort }}</template>
-          <SChevron />
+          <svg
+            class="mc-chat__chev"
+            width="8"
+            height="8"
+            viewBox="0 0 8 8"
+            aria-hidden="true"
+          ><path
+            d="M1 2.5 L4 5.5 L7 2.5"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.4"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          /></svg>
         </button>
 
         <!--
@@ -1714,7 +1823,20 @@ export default {
           @click="openManager('permissions')"
         >
           {{ optionBusy === 'permissions' ? '…' : (options.mode || 'permissions') }}
-          <SChevron />
+          <svg
+            class="mc-chat__chev"
+            width="8"
+            height="8"
+            viewBox="0 0 8 8"
+            aria-hidden="true"
+          ><path
+            d="M1 2.5 L4 5.5 L7 2.5"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.4"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          /></svg>
         </button>
 
         <span class="mc-chat__bar-gap" />
@@ -2194,6 +2316,23 @@ export default {
 
   &__chev { flex: 0 0 auto; opacity: 0.8; }
 
+  /*
+   * Rancher's stylesheet sizes every `button` on the page, and these are on its page.
+   *
+   * That is why the model rows and the effort pills came out two and three times their
+   * intended height: the shell sets a min-height and a line-height for a form control, this
+   * component's buttons are list rows and 11px chips, and nothing here was saying otherwise.
+   * Setting the padding and the font size is not enough - the properties that were winning are
+   * the ones this never mentioned. So they are named, once, for every button in the pane.
+   */
+  button {
+    min-height:  0;
+    height:      auto;
+    margin:      0;
+    line-height: 1.35;
+    box-shadow:  none;
+  }
+
   // ── The command menu ──
   // A list rather than a floating popup: the panel is narrow and often docked, and an
   // absolutely-positioned menu in here escapes the drawer on a phone. Same metrics as the
@@ -2357,7 +2496,8 @@ export default {
   }
 
   &__effort {
-    padding:       3px 9px;
+    padding:       2px 9px;
+    line-height:   1.5;
     border:        1px solid var(--border);
     border-radius: 999px;
     background:    transparent;

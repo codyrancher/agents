@@ -1144,9 +1144,15 @@ export default {
       ref="xterm"
       class="mc-terminal__xterm"
     />
-    <!-- Touch only: the keys a phone keyboard does not have. -->
+    <!--
+      Touch only, and terminal only: the keys a phone keyboard does not have, which are most of
+      what a TUI is driven with. The chat view is a text box rather than a TUI - Esc, Tab and an
+      armed Ctrl mean nothing to it, and the row was ten keys of noise under the composer. What
+      a text box does want on a phone is a way to move the caret, and ChatPane draws that above
+      its own box, where it is next to the thing it acts on.
+    -->
     <div
-      v-if="showKeyBar"
+      v-if="showKeyBar && view === 'terminal'"
       class="mc-terminal__keys"
     >
       <button
