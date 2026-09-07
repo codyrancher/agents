@@ -111,6 +111,11 @@ const TOUCH_LINE_PX = 24;
 // The row a phone keyboard is missing. Termux, Blink and iSH all ship one for
 // the same reason: without arrows there is no way to go back and fix a typo,
 // and without Esc there is no way out of a menu.
+//
+// Kept deliberately short. It also had start-of-line, end-of-line and delete-word - the three
+// glyphs nobody could name without hovering them, on a row where hovering is not available.
+// Every one of them is a Ctrl chord the armed Ctrl below can still send, so nothing became
+// impossible; the row just stopped spending a third of a phone's width on three characters.
 const KEY_BAR = [
   { label: 'Esc', seq: '\x1b' },
   { label: 'Tab', seq: '\t' },
@@ -125,15 +130,6 @@ const KEY_BAR = [
   },
   {
     label: '\u2193', seq: '\x1b[B', title: 'Down / next'
-  },
-  {
-    label: '\u21e4', seq: '\x01', title: 'Start of line (Ctrl+A)'
-  },
-  {
-    label: '\u21e5', seq: '\x05', title: 'End of line (Ctrl+E)'
-  },
-  {
-    label: '\u232b', seq: '\x17', title: 'Delete the word before the cursor (Ctrl+W)'
   },
   {
     label: '\u21b5', seq: '\r', title: 'Enter'
