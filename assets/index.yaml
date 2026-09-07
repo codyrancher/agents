@@ -12,17 +12,40 @@ entries:
       catalog.cattle.io/ui-component: plugins
       catalog.cattle.io/ui-extensions-version: '>= 3.0.0 < 4.0.0'
     apiVersion: v2
-    appVersion: 0.1.10
-    created: "2026-09-07T02:38:31.753307355Z"
+    appVersion: 0.1.11
+    created: "2026-09-07T03:13:18.638926257Z"
     description: The terminal, the agent pod and its conversations, offered to every
       extension in this Rancher
-    digest: 0cf2c8227f3888ee203f312a073741e6787a9e5572aa63a56c8d6da47a5cba40
+    digest: 31011ec97abd893e23dc5c572b042e81a730ba59a4f514cbff98f9fdf711000a
     home: https://github.com/codyrancher/agents
     icon: https://codyrancher.github.io/agents/icon.svg
     name: agents
     type: application
     urls:
-    - assets/agents/agents-0.1.10.tgz
+    - assets/agents/agents-0.1.11.tgz
+    version: 0.1.11
+  - annotations:
+      catalog.cattle.io/certified: rancher
+      catalog.cattle.io/display-name: Agents
+      catalog.cattle.io/namespace: cattle-ui-plugin-system
+      catalog.cattle.io/os: linux
+      catalog.cattle.io/permits-os: linux, windows
+      catalog.cattle.io/rancher-version: '>= 2.10.0'
+      catalog.cattle.io/scope: management
+      catalog.cattle.io/ui-component: plugins
+      catalog.cattle.io/ui-extensions-version: '>= 3.0.0 < 4.0.0'
+    apiVersion: v2
+    appVersion: 0.1.10
+    created: "2026-09-07T02:38:52.338468363Z"
+    description: The terminal, the agent pod and its conversations, offered to every
+      extension in this Rancher
+    digest: a3e2080f0891cee0dcaf6b8f355fdd1e24a39d1c3f498fb12ef0c17997d6c5ca
+    home: https://github.com/codyrancher/agents
+    icon: https://codyrancher.github.io/agents/icon.svg
+    name: agents
+    type: application
+    urls:
+    - https://github.com/codyrancher/agents/releases/download/agents-0.1.10/agents-0.1.10.tgz
     version: 0.1.10
   - annotations:
       catalog.cattle.io/certified: rancher
@@ -254,4 +277,4 @@ entries:
     urls:
     - https://github.com/codyrancher/agents/releases/download/agents-0.1.0/agents-0.1.0.tgz
     version: 0.1.0
-generated: "2026-09-07T02:38:31.752904569Z"
+generated: "2026-09-07T03:13:18.638565773Z"
