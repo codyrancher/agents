@@ -83,8 +83,16 @@ remember_conversation() {
   fi
 }
 
+FAILS=0
+
 while true; do
   start=$(date +%s)
+
+  # Adopt the latest shared login before (re)starting. claude reads its token once, at startup,
+  # so a restart is how this pane takes on a login done in another conversation - the sync
+  # (claude-credentials.mjs) stops claude here when a newer one arrives, and this is what makes
+  # the pane that comes back up hold it.
+  node /seed/claude-credentials.mjs pull >/dev/null 2>&1 || true
 
   transcripts > "$BEFORE"
 
@@ -128,13 +136,42 @@ while true; do
 
   end=$(date +%s)
 
-  if [ $((end - start)) -lt 3 ]; then
+  # A newer shared login landed while this pane was running: the sync (claude-credentials.mjs)
+  # asked for a reconnection and stopped claude to get one. Go straight back - the top of the
+  # loop has already pulled the new token - without the pause below, which is for a person.
+  if [ -n "$MC_RESTART_FLAG" ] && [ -f "$MC_RESTART_FLAG" ]; then
+    rm -f "$MC_RESTART_FLAG"
     echo ""
-    echo "[claude exited immediately, which usually means an error. Waiting 5s.]"
-    sleep 5
+    echo "[a newer login arrived - reconnecting this conversation]"
+    continue
   fi
 
-  echo ""
-  echo "[claude exited - press Enter to restart, Ctrl-C for a shell]"
-  read -r || exec /bin/bash
+  # A conversation is the pane, so a claude that stopped is one to bring back on its own rather
+  # than one to wait at a prompt for: having to press Enter to get your conversation back, and
+  # then resume it by hand, is the thing this loop exists to prevent. It restarts and the top of
+  # the loop resumes, so the pane returns to where it was without a keystroke.
+  #
+  # The exception is a claude that cannot stay up. Several starts that each died within a few
+  # seconds is a claude that is broken, not one that was exited, and restarting that is a spin -
+  # so after a run of them, and only then, the pane waits at a prompt where it can be dropped to
+  # a shell instead of churning. A start that lasted resets the count.
+  if [ $((end - start)) -lt 10 ]; then
+    FAILS=$((FAILS + 1))
+  else
+    FAILS=0
+  fi
+
+  if [ "$FAILS" -ge 3 ]; then
+    FAILS=0
+    echo ""
+    echo "[claude keeps exiting immediately, which usually means an error.]"
+    echo "[press Enter to try again, Ctrl-C for a shell]"
+    read -r || exec /bin/bash
+  else
+    echo ""
+    echo "[claude exited - restarting, Ctrl-C for a shell]"
+    # A short pause so a person who wanted out has a window for Ctrl-C (the trap drops to a
+    # shell), and so a claude failing just over the ten-second mark cannot spin at full speed.
+    sleep 2
+  fi
 done
