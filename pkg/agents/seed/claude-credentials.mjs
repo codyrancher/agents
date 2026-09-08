@@ -250,8 +250,15 @@ function syncOnce() {
 
   if (expiresAt(remote) > expiresAt(local) && refreshToken(remote) && refreshToken(remote) !== refreshToken(local)) {
     writeLocal({ ...local, claudeAiOauth: remote.claudeAiOauth });
-    say('a newer shared login arrived - reconnecting this pod\'s conversations onto it');
-    reconnectAll();
+    // The token is on disk, which is all a pane needs the next time it starts claude. What
+    // is deliberately not done here is restarting the panes that are running.
+    //
+    // It used to. A conversation in the middle of something is not a thing to interrupt on
+    // a timer, and this turn comes round every fifteen seconds: while a login was being
+    // refreshed - a normal hour of a working day - every pane in the pod was killed and
+    // started again, repeatedly, whatever it was doing. Whoever is using them decides when
+    // that is worth it: the Conversations page has a button, and it runs `reconnect` below.
+    say('a newer shared login arrived; panes keep the token they started with until they are restarted');
   }
 }
 
@@ -299,6 +306,26 @@ function releaseLock() {
 }
 
 // ── Dispatch ────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * `reconnect [id]` - what the button asks for: this pod's conversations, or one of them, put
+ * back onto the token on disk. The same mechanism the daemon used to run by itself, now only
+ * when somebody says so. The conversation is kept: the pane is not killed, claude inside it is,
+ * and the loop that owns the pane starts it again on the same conversation.
+ */
+if (MODE === 'reconnect') {
+  const only = process.argv[3];
+
+  if (only) {
+    reconnectPane(only.startsWith('mc-') ? only : `mc-${ only }`);
+    say(`reconnected ${ only }`);
+  } else {
+    reconnectAll();
+    say('reconnected every conversation in this pod');
+  }
+
+  process.exit(0);
+}
 
 if (MODE === 'sync') {
   if (!takeLock()) {

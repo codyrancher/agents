@@ -138,14 +138,19 @@ if ! command -v tmux >/dev/null 2>&1; then
   # its `update` takes minutes; wait for it (ten at most) rather than fail on its lock - and
   # stop waiting the moment tmux is there, whoever installed it.
   w=0
-  while pgrep -x apt-get >/dev/null 2>&1 && [ "$w" -lt 200 ]; do
+  while pgrep -x apt-get >/dev/null 2>&1 && [ "$w" -lt 40 ]; do
     command -v tmux >/dev/null 2>&1 && break
     sleep 3
     w=$((w + 1))
   done
   if ! command -v tmux >/dev/null 2>&1; then
-    apt-get -o DPkg::Lock::Timeout=180 update -qq || true
-    apt-get -o DPkg::Lock::Timeout=180 install -y -qq tmux </dev/null || echo "[tools] tmux did not install; the pane cannot run without it"
+    # ForceIPv4 and a connect timeout, because that is what hung: the pod resolves the Debian
+    # mirror to an IPv6 address it has no route to, and apt has no timeout of its own - one
+    # `update` sat there for twenty-five minutes with every terminal in the pod queued behind
+    # it, each printing that it was waiting for an install.
+    APT="apt-get -o Acquire::ForceIPv4=true -o Acquire::http::Timeout=20 -o Acquire::Retries=1 -o DPkg::Lock::Timeout=60"
+    $APT update -qq || true
+    $APT install -y -qq tmux </dev/null || echo "[tools] tmux did not install; the pane cannot run without it"
   fi
 fi
 
