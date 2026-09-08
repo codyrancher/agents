@@ -538,15 +538,24 @@ export default {
       try {
         const sub = this.view === 'main' ? '' : this.view;
         const out = await this.run([
-          `ID=${ JSON.stringify(this.paneId) }; OFF=${ this.offset }; SUB=${ JSON.stringify(sub) }; SOFF=${ this.sub.offset }`,
+          // CAP bounds the FIRST read of a transcript. A conversation that has run for hours has
+          // a transcript of many megabytes, and shipping the whole of it through one exec (base64
+          // over the WebSocket, inside the poll's timeout) does not arrive - so the @@DATA block
+          // never lands whole, parseTranscript sees nothing, and the chat sits on "Nothing has
+          // been said yet." even though the pane (read separately, below) is full. So on the
+          // first read (OFF is 0) only the last CAP bytes are taken: the recent history, which is
+          // what the view is for, small enough to arrive every time. A partial first line from
+          // cutting mid-file is dropped by parseTranscript, and the browser sets its offset to
+          // the true size, so every read after this one is just the delta.
+          `ID=${ JSON.stringify(this.paneId) }; OFF=${ this.offset }; SUB=${ JSON.stringify(sub) }; SOFF=${ this.sub.offset }; CAP=1048576`,
           `PROJ="$HOME/.claude/projects/${ projectKey(this.workdir) }"`,
           'uuid=$(cat "$(dirname "$HOME")/sessions/$ID.id" 2>/dev/null)',
           'FILE=""',
           'if [ -n "$uuid" ] && [ -f "$PROJ/$uuid.jsonl" ]; then FILE="$PROJ/$uuid.jsonl"; else FILE=$(ls -t "$PROJ"/*.jsonl 2>/dev/null | head -1); fi',
           'echo "@@FILE $FILE"',
-          'if [ -n "$FILE" ] && [ -f "$FILE" ]; then size=$(wc -c < "$FILE"); echo "@@SIZE $size"; if [ "$size" -gt "$OFF" ]; then echo "@@DATA"; tail -c +$((OFF+1)) "$FILE"; echo; echo "@@ENDDATA"; fi; fi',
-          // The subagent's transcript sits beside the session's, in a directory named for it.
-          'if [ -n "$SUB" ] && [ -n "$FILE" ]; then SF="${FILE%.jsonl}/subagents/agent-$SUB.jsonl"; if [ -f "$SF" ]; then ssize=$(wc -c < "$SF"); echo "@@SSIZE $ssize"; if [ "$ssize" -gt "$SOFF" ]; then echo "@@SDATA"; tail -c +$((SOFF+1)) "$SF"; echo; echo "@@SENDDATA"; fi; fi; fi',
+          'if [ -n "$FILE" ] && [ -f "$FILE" ]; then size=$(wc -c < "$FILE"); echo "@@SIZE $size"; FROM=$OFF; if [ "$OFF" -eq 0 ] && [ "$size" -gt "$CAP" ]; then FROM=$((size - CAP)); fi; if [ "$size" -gt "$FROM" ]; then echo "@@DATA"; tail -c +$((FROM+1)) "$FILE"; echo; echo "@@ENDDATA"; fi; fi',
+          // The subagent's transcript sits beside the session's, in a directory named for it. Capped the same way.
+          'if [ -n "$SUB" ] && [ -n "$FILE" ]; then SF="${FILE%.jsonl}/subagents/agent-$SUB.jsonl"; if [ -f "$SF" ]; then ssize=$(wc -c < "$SF"); echo "@@SSIZE $ssize"; SFROM=$SOFF; if [ "$SOFF" -eq 0 ] && [ "$ssize" -gt "$CAP" ]; then SFROM=$((ssize - CAP)); fi; if [ "$ssize" -gt "$SFROM" ]; then echo "@@SDATA"; tail -c +$((SFROM+1)) "$SF"; echo; echo "@@SENDDATA"; fi; fi; fi',
           // Every subagent's last line and when it was written, for the list of them.
           'if [ -n "$FILE" ] && [ -d "${FILE%.jsonl}/subagents" ]; then for f in "${FILE%.jsonl}"/subagents/agent-*.jsonl; do [ -f "$f" ] || continue; id=$(basename "$f" .jsonl); id=${id#agent-}; echo "@@TAIL $id $(stat -c %Y "$f")"; tail -c 6000 "$f" | grep "\"type\":\"assistant\"" | tail -n 1 | cut -c1-3000; done; echo "@@ENDTAILS"; fi',
           'echo "@@PANE"',
