@@ -54,6 +54,17 @@ fi
 # directory is /app, and a workspace's, whose is /workspace.
 HOME_DIR=${3:-/app/.home}
 
+# How this pane runs commands, when it runs them somewhere else.
+#
+# A conversation about another product's tree - dev-extension's workspaces - runs claude here,
+# in the one pod with the one login, and every command it runs belongs in that workspace's own
+# pod, where the dev server, the browser and the toolchain are. $5 is the wrapper that carries a
+# command there; claude runs it as CLAUDE_CODE_SHELL_PREFIX, which is a path to a program and
+# the command as its one argument. Empty for this pod's own conversations, which have nowhere
+# else to be. Read here, before anything asks about it - a later assignment would leave the
+# checks above it silently reading an empty one.
+SHELL_PREFIX=${5:-}
+
 # Made here as well as by whatever booted the pod, because everything below
 # writes into it and a missing one is a login that cannot be saved. Cheap, and
 # a no-op on the second tab.
@@ -135,7 +146,12 @@ fi
 if [ -f /seed/session-claude.md ]; then
   REFRESH_CLAUDE_MD=no
 
-  if [ ! -f "$WORKDIR/CLAUDE.md" ]; then
+  if [ -n "$SHELL_PREFIX" ]; then
+    # Somebody else's tree: it has its own CLAUDE.md, written by whoever laid the workspace out,
+    # and a copy of this pod's would both mislead the conversation and show up as a change to
+    # the checkout.
+    REFRESH_CLAUDE_MD=no
+  elif [ ! -f "$WORKDIR/CLAUDE.md" ]; then
     REFRESH_CLAUDE_MD=yes
   else
     case "$WORKDIR" in
@@ -220,6 +236,10 @@ fi
 
 PANE_PATH="$HOME_DIR/.local/bin:$PATH"
 PANE_ENV="env HOME=$HOME_DIR PATH=$PANE_PATH TERM=xterm-256color MC_RESTART_FLAG=$MC_RESTART_FLAG"
+
+if [ -n "$SHELL_PREFIX" ]; then
+  PANE_ENV="$PANE_ENV CLAUDE_CODE_SHELL_PREFIX=$SHELL_PREFIX"
+fi
 
 if [ "$MODE" = shell ]; then
   PANE="$PANE_ENV /bin/bash -l"

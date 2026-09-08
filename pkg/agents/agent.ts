@@ -45,6 +45,23 @@ const AGENT_WORKSPACE = '/workspace';
 const EXT_HOST_ROOT = AGENT_HOST_PATH.replace(/\/agent$/, '');
 
 /**
+ * The node's workspaces, and where they appear here.
+ *
+ * A workspace (dev-extension's: a checkout of a product, its browser and its dev server) keeps
+ * its tree on the node, and its own pod mounts it at this same path - `/workspaces/<name>` on
+ * both sides. That sameness is the point: a conversation about a workspace runs *here*, in this
+ * one pod with the one login, while every command it runs is forwarded into that workspace's
+ * pod. Both halves then say the same thing about where a file is, so a skill that names a path
+ * is right whichever half reads it.
+ *
+ * The parent rather than one mount per workspace, for the reason the extensions mount gives:
+ * a workspace made after this pod started is simply there.
+ */
+const WORKSPACES_HOST_ROOT = '/var/lib/rancher/dev-workspaces';
+
+const WORKSPACES_MOUNT = '/workspaces';
+
+/**
  * Where those trees appear in this pod.
  *
  * Under `/workspace` rather than at the root, because `/workspace` is the durable half of this
@@ -142,6 +159,9 @@ export function agentDeploymentBody(): Record<string, unknown> {
               // file with an editor instead of a shell command. What keeps two agents out of
               // one tree is the rule in the CLAUDE.md, not the mount.
               { name: 'extensions', mountPath: AGENT_EXT_MOUNT },
+              // Not nested in the workspace mount: these are another product's trees, and a
+              // conversation's own directory has nothing to do with them.
+              { name: 'workspaces', mountPath: WORKSPACES_MOUNT },
             ],
             // No probes. There is no port and nothing to ask; a pod with neither is Ready as
             // soon as it is Running, which for this one is the truth.
@@ -154,6 +174,7 @@ export function agentDeploymentBody(): Record<string, unknown> {
             // Deployment - and restarting this pod, and ending every conversation in it - every
             // time somebody made one.
             { name: 'extensions', hostPath: { path: EXT_HOST_ROOT, type: 'DirectoryOrCreate' } },
+            { name: 'workspaces', hostPath: { path: WORKSPACES_HOST_ROOT, type: 'DirectoryOrCreate' } },
           ],
         },
       },
