@@ -172,6 +172,21 @@ else
   env "HOME=$HOME_DIR" node /seed/claude-credentials.mjs pull || true
 fi
 
+# The shared-login sync, one per pod. It keeps this pod's token and the shared one in step in
+# both directions and, when a login done in another conversation arrives, restarts the panes
+# here onto it so they resume on the live token instead of dying on the dead one (the whole of
+# why is in claude-credentials.mjs). Fired on every attach; the daemon takes a lock and every
+# firing after the first is a no-op. `setsid ... &` so it outlives this script, which is about
+# to exec into tmux, and `< /dev/null` so it never shares this pane's input.
+if command -v setsid >/dev/null 2>&1; then
+  if [ "$(id -u)" = 0 ]; then
+    setpriv --reuid=1000 --regid=1000 --init-groups \
+      env "HOME=$HOME_DIR" setsid node /seed/claude-credentials.mjs sync >/dev/null 2>&1 </dev/null &
+  else
+    env "HOME=$HOME_DIR" setsid node /seed/claude-credentials.mjs sync >/dev/null 2>&1 </dev/null &
+  fi
+fi
+
 # tmux does not pass this script's environment into a session it is attaching to, only into one
 # it creates, so the queue file is given on the command line of the pane's own script instead.
 # What the pane runs, and whether this call attaches to it at all.
@@ -194,8 +209,17 @@ MODE=${4:-claude}
 # hands every new session the environment it was started with, which is whichever pane came
 # first; a pane started with the wrong HOME (a relative one, say) would otherwise be inherited
 # by every conversation after it, and claude with an empty HOME is claude asking to be set up.
+# Where this pane's loop and the sync meet: the sync touches this file to ask the loop to
+# reconnect the moment claude next stops (see claude-session.sh and claude-credentials.mjs). One
+# directory for the pod, beside the home and the sessions, named for the tmux session inside it.
+MC_RESTART_FLAG="$(dirname "$HOME_DIR")/.restart/$SESSION"
+mkdir -p "$(dirname "$MC_RESTART_FLAG")" 2>/dev/null || true
+if [ "$(id -u)" = 0 ]; then
+  chown node:node "$(dirname "$MC_RESTART_FLAG")" 2>/dev/null || true
+fi
+
 PANE_PATH="$HOME_DIR/.local/bin:$PATH"
-PANE_ENV="env HOME=$HOME_DIR PATH=$PANE_PATH TERM=xterm-256color"
+PANE_ENV="env HOME=$HOME_DIR PATH=$PANE_PATH TERM=xterm-256color MC_RESTART_FLAG=$MC_RESTART_FLAG"
 
 if [ "$MODE" = shell ]; then
   PANE="$PANE_ENV /bin/bash -l"
