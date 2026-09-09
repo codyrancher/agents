@@ -154,7 +154,15 @@ if ! command -v tmux >/dev/null 2>&1; then
   fi
 fi
 
-if [ ! -x "$CLAUDE_BIN" ]; then
+# Not every pod that runs this needs a claude in it.
+#
+# dev-extension's workspaces are the case: their conversations run in the agent pod now, and a
+# command only comes back here through a tunnel, so the CLI would be 400 MB of hostPath per
+# workspace that nothing ever executes - twice that once it takes an update, since installs
+# accumulate. They set TOOLS_NO_CLAUDE=1 and get tmux, kubectl and the rest.
+if [ "${TOOLS_NO_CLAUDE:-0}" = 1 ]; then
+  echo "[tools] skipping the claude cli (TOOLS_NO_CLAUDE)"
+elif [ ! -x "$CLAUDE_BIN" ]; then
   echo "[tools] installing the claude cli (this takes a moment)"
 
   # The native installer, into the pane's own durable home, and it is worth saying what that
@@ -205,6 +213,8 @@ fi
 # TRUST_DIRS is the pane's own directory, passed by shell.sh, so the folder the
 # tab is about to open in is one claude already trusts rather than one it stops
 # and asks about.
-as_node "node /seed/claude-defaults.mjs"
+if [ "${TOOLS_NO_CLAUDE:-0}" != 1 ]; then
+  as_node "node /seed/claude-defaults.mjs"
+fi
 
 echo "[tools] ready"
