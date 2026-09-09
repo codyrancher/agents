@@ -12,6 +12,29 @@ entries:
       catalog.cattle.io/ui-component: plugins
       catalog.cattle.io/ui-extensions-version: '>= 3.0.0 < 4.0.0'
     apiVersion: v2
+    appVersion: 0.1.27
+    created: "2026-09-09T17:01:08.585016045Z"
+    description: The terminal, the agent pod and its conversations, offered to every
+      extension in this Rancher
+    digest: 4c2145c5127cf571ccdad9e9efba7c7cbb4ff16ad195689da1c9b45ab62939cc
+    home: https://github.com/codyrancher/agents
+    icon: https://codyrancher.github.io/agents/icon.svg
+    name: agents
+    type: application
+    urls:
+    - https://github.com/codyrancher/agents/releases/download/agents-0.1.27/agents-0.1.27.tgz
+    version: 0.1.27
+  - annotations:
+      catalog.cattle.io/certified: rancher
+      catalog.cattle.io/display-name: Agents
+      catalog.cattle.io/namespace: cattle-ui-plugin-system
+      catalog.cattle.io/os: linux
+      catalog.cattle.io/permits-os: linux, windows
+      catalog.cattle.io/rancher-version: '>= 2.10.0'
+      catalog.cattle.io/scope: management
+      catalog.cattle.io/ui-component: plugins
+      catalog.cattle.io/ui-extensions-version: '>= 3.0.0 < 4.0.0'
+    apiVersion: v2
     appVersion: 0.1.26
     created: "2026-09-08T23:43:51.979304035Z"
     description: The terminal, the agent pod and its conversations, offered to every
@@ -599,4 +622,4 @@ entries:
     urls:
     - https://github.com/codyrancher/agents/releases/download/agents-0.1.0/agents-0.1.0.tgz
     version: 0.1.0
-generated: "2026-09-08T23:43:51.979407578Z"
+generated: "2026-09-09T17:01:08.585554058Z"
