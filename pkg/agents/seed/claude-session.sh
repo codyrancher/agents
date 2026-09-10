@@ -39,9 +39,11 @@ if [ -n "$QUEUE" ] && [ -f "$QUEUE" ]; then
   rm -f "$QUEUE"
 fi
 
-if [ -n "$PROMPT" ]; then
-  claude --dangerously-skip-permissions "$PROMPT" || true
-fi
+# The opening prompt is not run here, in a claude of its own, any more: that made a transcript
+# beside the one the loop below then started and recorded, so a reopened pane resumed the empty
+# loop conversation and the work the prompt began was stranded. It is handed instead to the
+# first fresh start inside the loop, so it runs in the very conversation this pane records and
+# resumes. Used once and then cleared - see the loop.
 
 # Which conversation belongs to this pane, when several share a directory.
 #
@@ -117,20 +119,30 @@ while true; do
     CONVERSATION=$(cat "$ID_FILE")
   fi
 
+  # The queued opening prompt, given only to a fresh start and only once: it is what a new
+  # conversation is for, so it has to run in the conversation this pane records and resumes, not
+  # in one beside it. An empty array expands to no argument, so a start with nothing queued is
+  # unchanged. A resume never wants it. Cleared below, so a restart carries on rather than asks
+  # again.
+  OPEN=()
+  [ -n "$PROMPT" ] && OPEN=("$PROMPT")
+
   if [ -n "$CONVERSATION" ]; then
     # This pane's own, by name. Falls through to a fresh one when it has been removed, which is
     # what resuming something no longer there should do.
     claude --dangerously-skip-permissions --resume "$CONVERSATION" 2>/dev/null ||
-      claude --dangerously-skip-permissions
+      claude --dangerously-skip-permissions "${OPEN[@]}"
   elif [ -n "$ID_FILE" ]; then
     # First start in a shared directory: open a new conversation rather than adopt one.
-    claude --dangerously-skip-permissions
+    claude --dangerously-skip-permissions "${OPEN[@]}"
   else
     # --continue fails when the directory has no conversation yet, which is the
     # only reason for the fallback.
     claude --dangerously-skip-permissions --continue 2>/dev/null ||
-      claude --dangerously-skip-permissions
+      claude --dangerously-skip-permissions "${OPEN[@]}"
   fi
+
+  PROMPT=""
 
   remember_conversation
 
