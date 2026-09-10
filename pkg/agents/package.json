@@ -1,7 +1,7 @@
 {
   "name": "agents",
   "description": "The terminal, the agent pod and its conversations, offered to every extension in this Rancher",
-  "version": "0.1.30",
+  "version": "0.1.31",
   "private": false,
   "icon": "https://codyrancher.github.io/agents/icon.svg",
   "homepage": "https://github.com/codyrancher/agents",
@@ -9,7 +9,7 @@
     "annotations": {
       "catalog.cattle.io/display-name": "Agents",
       "catalog.cattle.io/rancher-version": ">= 2.10.0",
-      "catalog.cattle.io/ui-extensions-version": ">= 3.0.0 < 4.0.0"
+      "catalog.cattle.io/ui-extensions-version": ">= 3.0.0 < 5.0.0"
     }
   },
   "scripts": {},
