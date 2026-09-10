@@ -14,24 +14,21 @@
 //     panel left here docked it left on somebody else's screen. See agent-drawer.ts.
 //
 // ---------------------------------------------------------------------------
-// Why the tab row is written out here rather than imported.
+// The conversations are a tab row, not a dropdown.
 //
-// It is Rancher's `@shell/components/Tabbed` - its markup, its class names, its roles and its
-// arrow-key behaviour - with two controls added to each tab. That component cannot express
-// those, and the check is short: its label is rendered as escaped text (`{{ tab.labelDisplay }}`
-// with no slot and no markup), and the one slot it has, `tab-row-extras`, is after the whole tab
-// list. Its own add and remove controls live in a `tab-list-footer` at the end of the row and
-// act on whichever tab happens to be active, which is exactly the arrangement being replaced: a
-// person closing the third conversation should not have to select it first.
+// One tab per conversation, click to switch - the whole set visible at a glance, which is what a
+// person wants when they are moving between two or three of them. Each tab carries its own
+// controls rather than one shared set acting on "the active one": a rename pencil and a close,
+// both appearing on hover (and on keyboard focus, so they are reachable without a mouse) in
+// reserved trailing space so a tab does not change width as the pointer crosses it. So closing
+// the third conversation does not mean selecting it first.
 //
-// So the row below is that row, kept deliberately recognisable, minus what a panel does not
-// have: no `useHash` (this is not a route, and putting a conversation id in the URL would put it
-// in Rancher's history), no side-tab mode, no extension tabs. Its styles are copied for the same
-// reason - Tabbed's are `scoped`, so the class names alone inherit nothing.
-//
-// The one intended visual difference beyond the controls: the active tab is not accented.
-// Rancher colours it `--active` and underlines it; here it reads as active through the underline
-// and the weight alone, because an accent colour on a terminal's chrome fights the terminal.
+// Written out here rather than imported from Rancher's `@shell/components/Tabbed`: that component
+// renders a label as escaped text with no slot, so per-tab controls cannot be added to it, and
+// it has no notion of a rename box in place of a label. It is a plain flex row instead - no
+// `useHash` (a conversation id in the URL would land in Rancher's history), no side-tab mode,
+// no extension tabs. The active tab is marked with a background and an underline; the row scrolls
+// sideways when there are more tabs than fit, and the new-conversation button rides at its end.
 // ---------------------------------------------------------------------------
 import { isAdminUser } from '@shell/store/type-map';
 // The Studio's design tokens, which SMenu and SIcon are drawn in. Imported here, the way every
@@ -204,38 +201,6 @@ export default {
       }];
     },
 
-    activeSession() {
-      return this.sessions.find((session) => session.id === this.active) || null;
-    },
-
-    /**
-     * The conversations as a menu: the phone's version of the tab row.
-     *
-     * Everything the row can do is here, because the row is not rendered beside it - picking
-     * one, starting another, renaming and ending the one that is open. Rename and End name the
-     * conversation they act on rather than saying "this one", since the menu is closed by the
-     * time anything happens and a menu that acted on something unnamed is how the wrong
-     * conversation gets ended.
-     */
-    sessionMenuItems() {
-      const title = this.activeSession?.title || '';
-
-      return [
-        ...this.sessions.map((session) => ({
-          id:    `go:${ session.id }`,
-          label: session.title,
-          icon:  session.id === this.active ? 'check' : '',
-        })),
-        { id: 'divider', divider: true },
-        { id: 'new', label: 'Another conversation', icon: 'plus' },
-        {
-          id: 'rename', label: title ? `Rename ${ title }` : 'Rename', icon: 'edit', disabled: !this.active,
-        },
-        {
-          id: 'end', label: title ? `End ${ title }` : 'End', icon: 'close', danger: true, disabled: !this.active,
-        },
-      ];
-    },
   },
 
   /**
@@ -326,27 +291,6 @@ export default {
     },
 
     /** The conversations menu, which is the tab row on a phone. */
-    onSessionMenu(id) {
-      if (id.startsWith('go:')) {
-        this.select(id.slice(3));
-
-        return;
-      }
-      if (id === 'new') {
-        this.startNew();
-
-        return;
-      }
-      if (id === 'rename' && this.active) {
-        this.startRename(this.active);
-
-        return;
-      }
-      if (id === 'end' && this.active) {
-        this.closeSession(this.active);
-      }
-    },
-
     /**
      * Take a side, or come off the edges altogether.
      *
@@ -657,74 +601,89 @@ export default {
 
     <div class="mc-agent__row">
       <!--
-        On a phone the conversations are a menu, not a row.
-
-        The row is a horizontal scroller: at 390px it shows two and a half names, costs a line
-        of the panel, and every one of its controls is a 12px glyph inside a tab that is itself
-        a scroll target. Behind one button the pane gets that line back, the names are readable
-        in full, and rename and end become entries somebody can hit. Everything the row does is
-        in sessionMenuItems, because the row is not rendered beside it.
+        Conversations as tabs: one per conversation, click to switch. The rename pencil and the
+        close control appear on hover, and on keyboard focus so they are reachable without a
+        mouse; they sit in reserved trailing space, so a tab does not change width as the pointer
+        crosses it. The row scrolls sideways when there are more tabs than fit, and the new-
+        conversation button rides at its end where a new tab would appear.
       -->
-      <SMenu
-        :items="sessionMenuItems"
-        align="left"
+      <div
+        class="mc-agent__tabs"
+        role="tablist"
         aria-label="Conversations"
-        class="mc-agent__picker"
-        @select="onSessionMenu"
       >
-        <template #trigger>
-          <span class="mc-agent__picker-title">{{ (activeSession && activeSession.title) || 'Conversations' }}</span>
-          <span
-            v-if="sessions.length > 1"
-            class="mc-agent__picker-count"
-          >{{ sessions.length }}</span>
+        <div
+          v-for="session in sessions"
+          :id="`tab-${ session.id }`"
+          :key="session.id"
+          class="mc-agent__tab"
+          :class="{ 'mc-agent__tab--active': session.id === active }"
+          role="tab"
+          :tabindex="session.id === active ? 0 : -1"
+          :aria-selected="session.id === active"
+          :aria-controls="session.id"
+          :title="session.title"
+          @click="select(session.id)"
+          @keydown.enter.prevent="select(session.id)"
+          @dblclick="startRename(session.id)"
+          @mousedown.middle.prevent="closeSession(session.id)"
+        >
+          <input
+            v-if="renaming && renaming.id === session.id"
+            :ref="(el) => { if (el) renameRef = el; }"
+            v-model="renaming.title"
+            class="mc-agent__rename"
+            aria-label="Name this conversation"
+            @click.stop
+            @keydown.enter.prevent="commitRename"
+            @keydown.esc.prevent="renaming = null"
+            @blur="commitRename"
+          >
+          <template v-else>
+            <span class="mc-agent__tab-title">{{ session.title }}</span>
+            <button
+              type="button"
+              class="mc-agent__tab-control mc-agent__tab-control--rename"
+              aria-label="Rename conversation"
+              title="Rename"
+              tabindex="-1"
+              @click.stop="startRename(session.id)"
+            >
+              <SIcon
+                name="edit"
+                :size="12"
+              />
+            </button>
+            <button
+              type="button"
+              class="mc-agent__tab-control mc-agent__tab-control--close"
+              aria-label="End conversation"
+              title="End conversation"
+              tabindex="-1"
+              @click.stop="closeSession(session.id)"
+            >
+              <SIcon
+                name="close"
+                :size="12"
+              />
+            </button>
+          </template>
+        </div>
+
+        <!-- New conversation, at the end of the tabs where a new one would appear. -->
+        <button
+          type="button"
+          class="mc-agent__new"
+          aria-label="New conversation"
+          title="New conversation"
+          @click="startNew"
+        >
           <SIcon
-            name="chevronDown"
-            :size="12"
+            name="plus"
+            :size="14"
           />
-        </template>
-      </SMenu>
-
-      <!--
-        New conversation, as a button rather than only a menu entry: starting one is the thing
-        this bar is asked for most, and a one-click control beside the picker is easier to find
-        and to hit than the same action folded into the dropdown. The dropdown keeps its entry
-        too, for the phone layout and for anyone already there.
-      -->
-      <button
-        type="button"
-        class="mc-agent__new"
-        aria-label="New conversation"
-        title="New conversation"
-        @click="startNew"
-      >
-        <SIcon
-          name="plus"
-          :size="14"
-        />
-      </button>
-
-      <!-- The rename box, which now has no tab to live in. -->
-      <input
-        v-if="renaming"
-        :ref="(el) => { if (el) renameRef = el; }"
-        v-model="renaming.title"
-        class="mc-agent__rename mc-agent__rename--wide"
-        aria-label="Name this conversation"
-        @keydown.enter.prevent="commitRename"
-        @keydown.esc.prevent="renaming = null"
-        @blur="commitRename"
-      >
-
-      <!--
-        Rancher's tab row used to be here, and is gone.
-
-        It was one line across the top of a panel that is often 300px tall, showing names the
-        picker above already shows - and with the picker beside it, two controls answering one
-        question. Choosing, renaming, ending and starting a conversation are all in the menu,
-        which is where they can be read in full and hit with a thumb; moving between them is
-        the menu's own arrow keys rather than the row's.
-      -->
+        </button>
+      </div>
 
       <!--
         Outside the scroller, pinned to the right edge: however many conversations are open, and
@@ -986,114 +945,131 @@ export default {
     }
   }
 
+  // The controls on a tab: rename (pencil) and end (close). Square hover targets, absolutely
+  // placed in the tab's reserved trailing padding, and hidden until the tab is hovered or holds
+  // focus - a tab at rest is just its name. Out of the flow, so showing them costs the tab no
+  // width and the row does not shift as the pointer crosses it.
   &__tab-control {
-    display: flex;
+    display: none;
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
     align-items: center;
     justify-content: center;
-    // A square, so the hover surface is centred on the glyph and the same for both controls
-    // rather than sized by each icon's own box.
+    // A square, so the hover surface is centred on the glyph rather than sized by each icon.
     width: 20px;
     height: 20px;
     padding: 0;
-    // Rancher gives every button in the dashboard a 40px min-height, which stretched these to
-    // the full height of the row and made the row four pixels taller than Rancher's own. The
-    // same line is in SMenu's trigger, for the same reason.
+    // Rancher gives every button a 40px min-height, which would stretch these past the row.
     min-height: 0;
     border: none;
     border-radius: 3px;
     background: none;
     color: var(--body-text);
     cursor: pointer;
-    opacity: 0.55;
+    opacity: 0.6;
 
     &:hover {
       opacity: 1;
       background: var(--default-hover-bg, var(--body-bg));
     }
 
-    // Shown when the pointer is over this tab, or when something inside it has focus - a
-    // control only a mouse can reach is one a keyboard user cannot reach at all, and the
-    // double click that also renames is not an affordance anybody can see.
-    //
-    // Out of the flow, inside the trailing padding the anchor already has, so it costs the tab
-    // no width at all. That is what makes the row not move when the pointer crosses it: there
-    // is no slot being reserved and then filled, and therefore nothing to get wrong. Reserving
-    // a slot instead - the obvious version - makes every tab permanently a button wider and
-    // doubles the gap between the label and the first control.
+    // The close at the tab's right edge; the rename pencil immediately left of it.
+    &--close {
+      right: 4px;
+    }
+
     &--rename {
-      display: none;
-      position: absolute;
-      // Immediately left of the close control: 4px of tab padding plus its 20px box.
-      right: 24px;
-      top: 50%;
-      transform: translateY(-50%);
+      right: 26px;
     }
   }
 
-  .tab:hover &__tab-control--rename,
-  .tab:focus-within &__tab-control--rename {
+  &__tab:hover &__tab-control,
+  &__tab:focus-within &__tab-control {
     display: flex;
   }
 
+  // The rename box, in place of the tab's title while a tab is being renamed. Fills the tab it
+  // sits in; the tab drops its trailing control padding while it holds one (see &__tab).
   &__rename {
-    // Wide enough for a name, and capped so that opening it never pushes the add control past
-    // the edge of a row that was fitting a moment ago.
-    width: 150px;
-    max-width: 30vw;
-    margin: 4px 0;
+    width: 100%;
+    min-width: 80px;
     padding: 3px 6px;
     border: 1px solid var(--border);
     border-radius: 3px;
     background: var(--body-bg);
     color: var(--body-text);
     font-size: 13px;
-
-    // On a phone there is no row to keep inside, so the box takes the width it needs.
-    &--wide {
-      flex: 1 1 auto;
-      width: auto;
-      max-width: none;
-      margin: 4px 8px 4px 0;
-    }
   }
 
-  // ── The conversations, as a menu (phone width) ──
-  &__picker {
-    flex: 0 1 auto;
+  // ── The conversations, as tabs ──
+  //
+  // A horizontal row that scrolls when there are more tabs than fit, so switching is one click
+  // and the whole set is visible at a glance rather than behind a dropdown.
+  &__tabs {
+    flex: 1 1 auto;
+    display: flex;
+    align-items: center;
+    gap: 2px;
     min-width: 0;
-    margin: 2px 0;
+    overflow-x: auto;
+    // A thin scrollbar; the platform's full one is most of a 32px row's height. Firefox reads
+    // the first line, WebKit the second.
+    scrollbar-width: thin;
 
-    :deep(button) {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      max-width: 100%;
-      // A thumb target, and the same height as the controls at the other end of the bar.
-      min-height: 32px;
-      padding: 0 8px;
+    &::-webkit-scrollbar {
+      height: 6px;
     }
   }
 
-  &__picker-title {
+  &__tab {
+    position: relative;
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    max-width: 200px;
+    min-width: 0;
+    height: 32px;
+    margin: 2px 0;
+    // Trailing room for the two controls (close at 4px, rename at 26px, each 20px wide),
+    // reserved so they can appear on hover without moving the label.
+    padding: 0 48px 0 10px;
+    border: none;
+    border-radius: 4px;
+    background: none;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 13px;
+    white-space: nowrap;
+
+    &:hover {
+      background: var(--default-hover-bg, var(--body-bg));
+      color: var(--body-text);
+    }
+
+    // The open conversation: the one the terminal below is showing.
+    &--active {
+      background: var(--body-bg);
+      color: var(--body-text);
+      box-shadow: inset 0 -2px 0 var(--primary, var(--link, currentColor));
+    }
+
+    // While renaming there is an input, not a label and controls, so the reserved trailing
+    // space is given back to the box.
+    &:has(.mc-agent__rename) {
+      padding-right: 10px;
+    }
+  }
+
+  &__tab-title {
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-size: 13px;
   }
 
-  // How many there are, since the trigger only names the one that is open.
-  &__picker-count {
-    flex: 0 0 auto;
-    padding: 0 6px;
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--body-text) 10%, transparent);
-    color: var(--muted);
-    font-size: 11px;
-  }
-
-  // New conversation, beside the picker. Same height as the picker so the two read as one pair,
-  // and the same bare-icon treatment as the options button at the other end of the bar.
+  // New conversation, at the end of the tab row where a new tab would appear. The same bare-icon
+  // treatment as the options button at the other end of the bar.
   &__new {
     flex: 0 0 auto;
     display: flex;
