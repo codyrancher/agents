@@ -685,6 +685,25 @@ export default {
         </template>
       </SMenu>
 
+      <!--
+        New conversation, as a button rather than only a menu entry: starting one is the thing
+        this bar is asked for most, and a one-click control beside the picker is easier to find
+        and to hit than the same action folded into the dropdown. The dropdown keeps its entry
+        too, for the phone layout and for anyone already there.
+      -->
+      <button
+        type="button"
+        class="mc-agent__new"
+        aria-label="New conversation"
+        title="New conversation"
+        @click="startNew"
+      >
+        <SIcon
+          name="plus"
+          :size="14"
+        />
+      </button>
+
       <!-- The rename box, which now has no tab to live in. -->
       <input
         v-if="renaming"
@@ -1071,6 +1090,30 @@ export default {
     background: color-mix(in srgb, var(--body-text) 10%, transparent);
     color: var(--muted);
     font-size: 11px;
+  }
+
+  // New conversation, beside the picker. Same height as the picker so the two read as one pair,
+  // and the same bare-icon treatment as the options button at the other end of the bar.
+  &__new {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    min-height: 32px;
+    margin: 2px 0;
+    padding: 0;
+    border: none;
+    border-radius: 3px;
+    background: none;
+    color: var(--body-text);
+    cursor: pointer;
+    opacity: 0.7;
+
+    &:hover {
+      opacity: 1;
+      background: var(--default-hover-bg, var(--body-bg));
+    }
   }
 
   &__note {
