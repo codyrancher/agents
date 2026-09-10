@@ -10,19 +10,42 @@ entries:
       catalog.cattle.io/rancher-version: '>= 2.10.0'
       catalog.cattle.io/scope: management
       catalog.cattle.io/ui-component: plugins
-      catalog.cattle.io/ui-extensions-version: '>= 3.0.0 < 4.0.0'
+      catalog.cattle.io/ui-extensions-version: '>= 3.0.0 < 5.0.0'
     apiVersion: v2
-    appVersion: 0.1.30
-    created: "2026-09-10T17:27:41.51269366Z"
+    appVersion: 0.1.31
+    created: "2026-09-10T20:54:13.427197384Z"
     description: The terminal, the agent pod and its conversations, offered to every
       extension in this Rancher
-    digest: 147fe4b0366c4d96afae7965197ab6f4e490433a2ce6f7d50216f319aa41d329
+    digest: 179095ed814d35f31835b8eb552bef49ab9bb1bec0ce9e84cd34863b0048d98a
     home: https://github.com/codyrancher/agents
     icon: https://codyrancher.github.io/agents/icon.svg
     name: agents
     type: application
     urls:
-    - assets/agents/agents-0.1.30.tgz
+    - assets/agents/agents-0.1.31.tgz
+    version: 0.1.31
+  - annotations:
+      catalog.cattle.io/certified: rancher
+      catalog.cattle.io/display-name: Agents
+      catalog.cattle.io/namespace: cattle-ui-plugin-system
+      catalog.cattle.io/os: linux
+      catalog.cattle.io/permits-os: linux, windows
+      catalog.cattle.io/rancher-version: '>= 2.10.0'
+      catalog.cattle.io/scope: management
+      catalog.cattle.io/ui-component: plugins
+      catalog.cattle.io/ui-extensions-version: '>= 3.0.0 < 4.0.0'
+    apiVersion: v2
+    appVersion: 0.1.30
+    created: "2026-09-10T17:28:04.633653207Z"
+    description: The terminal, the agent pod and its conversations, offered to every
+      extension in this Rancher
+    digest: b5a6b436538f6c70f8ecc11eca24eea73b48210df54903c4f9e43d24dd8b459a
+    home: https://github.com/codyrancher/agents
+    icon: https://codyrancher.github.io/agents/icon.svg
+    name: agents
+    type: application
+    urls:
+    - https://github.com/codyrancher/agents/releases/download/agents-0.1.30/agents-0.1.30.tgz
     version: 0.1.30
   - annotations:
       catalog.cattle.io/certified: rancher
@@ -691,4 +714,4 @@ entries:
     urls:
     - https://github.com/codyrancher/agents/releases/download/agents-0.1.0/agents-0.1.0.tgz
     version: 0.1.0
-generated: "2026-09-10T17:27:41.512083034Z"
+generated: "2026-09-10T20:54:13.426538582Z"
