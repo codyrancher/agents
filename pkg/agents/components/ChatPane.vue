@@ -282,6 +282,8 @@ export default {
       viewerData:  '',
       /** What the terminal printed for a command the transcript does not record (see TERMINAL_ONLY). */
       echoes:      [],
+      /** The terminal's panel for /usage, /status and the like, shown as a modal until closed. */
+      panel:       null,
       /** When the last poll came back, as ISO: a stalled poll is a view that stopped being true. */
       polledAt:    '',
       /**
@@ -1270,123 +1272,58 @@ export default {
     },
 
     /**
-     * Read back what the terminal printed for a command that prints only there.
+     * Read back what the terminal printed for a command that prints only there, and show it.
      *
-     * A little after the send, the pane's new lines - the ones not in the capture taken before
-     * it - minus the prompt row and the status bar. Shown as a note under the log, dated now,
-     * and kept for this visit only: it is the terminal's answer, not the conversation's.
+     * These commands open a panel (Settings · Status · Config · Usage · Stats) that stays until
+     * Esc. So: wait for the panel to actually be there - a busy session draws it late, and a
+     * capture taken early found nothing and left the Esc hitting the prompt instead, which is
+     * how the terminal came to be stuck inside the panel - then take its text, close it, and
+     * check it closed. The text goes into a modal of its own rather than the log: it is the
+     * terminal's answer to a question, not part of the conversation.
      */
     async echoTerminal(command, before) {
-      await new Promise((resolve) => setTimeout(resolve, 1800));
-      let after = '';
+      const seen = new Set(before.split('\n').map((l) => l.trim()));
+      const capture = async () => {
+        const after = await this.run(`tmux capture-pane -p -t "mc-${ this.paneId }" | tail -n 60`);
+
+        return after.split('\n')
+          .map((l) => l.replace(/[│┃]/g, ' ').trimEnd())
+          .filter((l) => l.trim() && !seen.has(l.trim()) && !/^\s*❯/.test(l) && !/shift\+tab|esc to interrupt|for shortcuts|bypass permissions/i.test(l) && !/^[\s─╌═┌┐└┘╭╮╰╯▔▁]+$/.test(l));
+      };
+      let fresh = [];
 
       try {
-        after = await this.run(`tmux capture-pane -p -t "mc-${ this.paneId }" | tail -n 60`);
+        // Up to six seconds for the panel to draw; a panel is several new lines at once.
+        for (let i = 0; i < 12 && fresh.length < 3; i++) {
+          await new Promise((resolve) => setTimeout(resolve, 500));
+          fresh = await capture();
+        }
+        // Close it, and make sure it closed: one Esc suffices when the panel is up.
+        for (let i = 0; i < 3; i++) {
+          await this.keys('Escape');
+          await new Promise((resolve) => setTimeout(resolve, 700));
+          const still = await capture();
+
+          if (still.length < 3) {
+            break;
+          }
+        }
       } catch {
         return;
       }
-      const seen = new Set(before.split('\n').map((l) => l.trim()));
-      const fresh = after.split('\n')
-        .map((l) => l.replace(/[│┃]/g, ' ').trimEnd())
-        .filter((l) => l.trim() && !seen.has(l.trim()) && !/^\s*❯/.test(l) && !/shift\+tab|esc to interrupt|for shortcuts|bypass permissions/i.test(l) && !/^[\s─╌═┌┐└┘╭╮╰╯▔▁]+$/.test(l));
-
-      // These commands open a panel in the terminal (Settings · Status · Usage · Stats) and it
-      // stays open until Esc. The chat has what it came for; the terminal should not be left
-      // inside a panel that whoever opens it next did not open.
-      this.keys('Escape').catch(() => {});
       if (!fresh.length) {
         return;
       }
-      this.echoes = [...this.echoes, {
-        key: `echo-${ Date.now().toString(36) }`, role: 'note', text: `${ command }\n${ fresh.join('\n') }`, tools: [], thinking: '', images: [], at: new Date().toISOString(),
-      }];
-      this.$nextTick(() => this.scrollToEnd());
+      this.panel = { title: command, text: fresh.join('\n') };
+      // Focus it, so Esc closes it without a click first.
+      this.$nextTick(() => document.querySelector('.mc-chat__lightbox--panel')?.focus());
     },
 
-    /** A menu action that is a slash command: sent as typed, with the terminal's answer echoed. */
-    async command(text) {
-      this.menu = '';
-      this.draft = text;
-      await this.send();
-    },
-
-    async clearConversation() {
-      this.menu = '';
-      // eslint-disable-next-line no-alert
-      if (!window.confirm('Clear this conversation? claude forgets everything said so far.')) {
-        return;
+    /** The panel modal: closed by its button or by Esc. */
+    onPanelKey(event) {
+      if (event.key === 'Escape') {
+        this.panel = null;
       }
-      await this.command('/clear');
-    },
-
-    /** Files chosen with the Attach button: images shrink as pasted ones do, anything else goes as it is. */
-    attachPicked(event) {
-      for (const file of [...(event.target.files || [])]) {
-        this.attachImage(file);
-      }
-      event.target.value = '';
-      this.$nextTick(() => this.$refs.box?.focus());
-    },
-
-    /** The checkout's files, for the mention picker: what git tracks plus what it has not been told to ignore. */
-    async openFiles() {
-      this.menu = '';
-      this.files = {
-        ...this.files, open: true, loading: true, filter: '',
-      };
-      this.$nextTick(() => this.$refs.fileFilter?.focus());
-      try {
-        const out = await this.run(`cd ${ JSON.stringify(this.workdir) } && (git ls-files --cached --others --exclude-standard 2>/dev/null || find . -type f -not -path '*/node_modules/*' -not -path '*/.git/*' | sed 's|^./||') | head -n 4000`, 30000);
-
-        this.files = { ...this.files, list: out.split('\n').map((l) => l.trim()).filter(Boolean), loading: false };
-      } catch (e) {
-        this.files = { ...this.files, loading: false };
-        this.error = e.message || String(e);
-      }
-    },
-
-    mention(path) {
-      const at = `@${ path }`;
-
-      this.draft = `${ this.draft }${ this.draft && !this.draft.endsWith(' ') ? ' ' : '' }${ at } `;
-      this.files = { ...this.files, open: false };
-      this.$nextTick(() => this.$refs.box?.focus());
-    },
-
-    /**
-     * Whether claude thinks before answering, read from and written to the pane's own
-     * settings.json - the same key /config's "Thinking mode" flips. claude reads it at the
-     * start of each turn, so the change applies to the next message.
-     */
-    async readThinking() {
-      try {
-        const out = await this.run(`node -e "const s=require(process.env.HOME+'/.claude/settings.json');console.log(s.alwaysThinkingEnabled===false?'off':'on')" 2>/dev/null || echo on`);
-
-        this.thinking = !/off/.test(out);
-      } catch {
-        this.thinking = null;
-      }
-    },
-
-    async toggleThinking() {
-      const next = !this.thinking;
-
-      this.optionBusy = 'thinking';
-      try {
-        await this.run(`node -e "const f=process.env.HOME+'/.claude/settings.json';const fs=require('fs');const s=JSON.parse(fs.readFileSync(f,'utf8'));s.alwaysThinkingEnabled=${ next ? 'true' : 'false' };fs.writeFileSync(f,JSON.stringify(s,null,2)+'\\n')"`);
-        this.thinking = next;
-      } catch (e) {
-        this.error = e.message || String(e);
-      } finally {
-        this.optionBusy = '';
-      }
-    },
-
-    setLook(key, value) {
-      this.look = { ...this.look, [key]: value };
-      try {
-        localStorage.setItem(LOOK_KEY, JSON.stringify(this.look));
-      } catch { /* a browser without storage keeps it for this visit */ }
     },
 
     /** Send a message the pane never recorded, again. */
@@ -2092,6 +2029,30 @@ export default {
         @close="viewerPath = ''"
       />
       <div
+        v-if="panel"
+        class="mc-chat__lightbox mc-chat__lightbox--panel"
+        role="dialog"
+        :aria-label="panel.title"
+        tabindex="-1"
+        @click.self="panel = null"
+        @keydown="onPanelKey"
+      >
+        <div class="mc-chat__panel">
+          <div class="mc-chat__panel-head">
+            <span class="mc-chat__panel-title">{{ panel.title }}</span>
+            <button
+              type="button"
+              class="mc-chat__pill"
+              title="Close (Esc)"
+              @click="panel = null"
+            >
+              Close
+            </button>
+          </div>
+          <pre class="mc-chat__panel-text">{{ panel.text }}</pre>
+        </div>
+      </div>
+      <div
         v-if="viewerData"
         class="mc-chat__lightbox"
         role="dialog"
@@ -2709,6 +2670,39 @@ export default {
     cursor:        zoom-in;
     object-fit:    contain;
     background:    var(--body-bg);
+  }
+
+  &__lightbox--panel { cursor: default; }
+
+  &__panel {
+    background:    var(--body-bg);
+    color:         var(--body-text);
+    border:        1px solid var(--border);
+    border-radius: 8px;
+    width:         min(92vw, 760px);
+    max-height:    88vh;
+    display:       flex;
+    flex-direction: column;
+    box-shadow:    0 12px 40px rgba(0, 0, 0, 0.35);
+  }
+
+  &__panel-head {
+    display:         flex;
+    align-items:     center;
+    justify-content: space-between;
+    padding:         10px 14px;
+    border-bottom:   1px solid var(--border);
+  }
+
+  &__panel-title { font-family: monospace; font-weight: 600; }
+
+  &__panel-text {
+    margin:      0;
+    padding:     12px 14px;
+    overflow:    auto;
+    font-size:   12px;
+    line-height: 1.45;
+    white-space: pre;
   }
 
   &__lightbox {
