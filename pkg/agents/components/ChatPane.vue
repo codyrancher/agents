@@ -1917,7 +1917,7 @@ export default {
           >{{ m.thinking }}</pre>
         </div>
         <div
-          v-if="(m.role === 'assistant' || (m.role === 'summary' && openSummaries[m.key])) && m.html"
+          v-if="(m.role === 'assistant' || m.role === 'note' || (m.role === 'summary' && openSummaries[m.key])) && m.html"
           class="mc-chat__body mc-chat__md"
           v-html="m.html"
         />
