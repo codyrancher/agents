@@ -80,6 +80,25 @@ function terminalOnly(text) {
   return !!match && TERMINAL_ONLY.includes(match[1]);
 }
 
+/** Appearance preferences: what they are, and what a fresh browser gets. */
+const LOOK_KEY = 'mc-chat.look';
+const LOOK_DEFAULTS = {
+  size:     'medium', // small | medium | large
+  density:  'comfortable', // compact | comfortable
+  bubbles:  true, // user messages in a bubble, or flat like the rest
+  thoughts: false, // thinking rows open by default
+  toolIo:   false, // tool rows open by default
+  times:    true, // timestamps on messages
+};
+
+function readLook() {
+  try {
+    return { ...LOOK_DEFAULTS, ...JSON.parse(localStorage.getItem(LOOK_KEY) || '{}') };
+  } catch {
+    return { ...LOOK_DEFAULTS };
+  }
+}
+
 const PENDING_KEY = 'mc-chat.pending';
 
 function readPending(paneId) {
@@ -265,6 +284,18 @@ export default {
       echoes:      [],
       /** When the last poll came back, as ISO: a stalled poll is a view that stopped being true. */
       polledAt:    '',
+      /**
+       * The "Mention file" picker: the checkout's files, read once per opening, and the filter.
+       * What it inserts is `@path`, which claude resolves at submit the way typing it would.
+       */
+      files:       { open: false, list: [], filter: '', loading: false },
+      /** Whether claude thinks before answering: the alwaysThinkingEnabled setting in the pane's home. */
+      thinking:    null,
+      /**
+       * How the log looks, kept per browser. Every one of these is a class on the root and
+       * nothing else, so a preference is a line of CSS rather than a branch in the template.
+       */
+      look:        readLook(),
       media:       null,
       notice:      '',
       noticeTimer: null,
@@ -521,6 +552,22 @@ export default {
       return !!this.draft.trim() && !this.sending;
     },
 
+    fileMatches() {
+      const q = this.files.filter.trim().toLowerCase();
+      const list = q ? this.files.list.filter((f) => f.toLowerCase().includes(q)) : this.files.list;
+
+      return list.slice(0, 40);
+    },
+
+    lookToggles() {
+      return [
+        { key: 'bubbles', label: 'Your messages in a bubble' },
+        { key: 'thoughts', label: 'Thinking open by default' },
+        { key: 'toolIo', label: 'Tool input and output open by default' },
+        { key: 'times', label: 'Show times' },
+      ];
+    },
+
     working() {
       return this.pane.busy;
     },
@@ -577,6 +624,7 @@ export default {
     this.poll();
     this.readCommands();
     this.readOptions();
+    this.readThinking();
     this.timer = setInterval(() => this.poll(), POLL_MS);
   },
 
@@ -1255,6 +1303,92 @@ export default {
       this.$nextTick(() => this.scrollToEnd());
     },
 
+    /** A menu action that is a slash command: sent as typed, with the terminal's answer echoed. */
+    async command(text) {
+      this.menu = '';
+      this.draft = text;
+      await this.send();
+    },
+
+    async clearConversation() {
+      this.menu = '';
+      // eslint-disable-next-line no-alert
+      if (!window.confirm('Clear this conversation? claude forgets everything said so far.')) {
+        return;
+      }
+      await this.command('/clear');
+    },
+
+    /** Files chosen with the Attach button: images shrink as pasted ones do, anything else goes as it is. */
+    attachPicked(event) {
+      for (const file of [...(event.target.files || [])]) {
+        this.attachImage(file);
+      }
+      event.target.value = '';
+      this.$nextTick(() => this.$refs.box?.focus());
+    },
+
+    /** The checkout's files, for the mention picker: what git tracks plus what it has not been told to ignore. */
+    async openFiles() {
+      this.menu = '';
+      this.files = {
+        ...this.files, open: true, loading: true, filter: '',
+      };
+      this.$nextTick(() => this.$refs.fileFilter?.focus());
+      try {
+        const out = await this.run(`cd ${ JSON.stringify(this.workdir) } && (git ls-files --cached --others --exclude-standard 2>/dev/null || find . -type f -not -path '*/node_modules/*' -not -path '*/.git/*' | sed 's|^./||') | head -n 4000`, 30000);
+
+        this.files = { ...this.files, list: out.split('\n').map((l) => l.trim()).filter(Boolean), loading: false };
+      } catch (e) {
+        this.files = { ...this.files, loading: false };
+        this.error = e.message || String(e);
+      }
+    },
+
+    mention(path) {
+      const at = `@${ path }`;
+
+      this.draft = `${ this.draft }${ this.draft && !this.draft.endsWith(' ') ? ' ' : '' }${ at } `;
+      this.files = { ...this.files, open: false };
+      this.$nextTick(() => this.$refs.box?.focus());
+    },
+
+    /**
+     * Whether claude thinks before answering, read from and written to the pane's own
+     * settings.json - the same key /config's "Thinking mode" flips. claude reads it at the
+     * start of each turn, so the change applies to the next message.
+     */
+    async readThinking() {
+      try {
+        const out = await this.run(`node -e "const s=require(process.env.HOME+'/.claude/settings.json');console.log(s.alwaysThinkingEnabled===false?'off':'on')" 2>/dev/null || echo on`);
+
+        this.thinking = !/off/.test(out);
+      } catch {
+        this.thinking = null;
+      }
+    },
+
+    async toggleThinking() {
+      const next = !this.thinking;
+
+      this.optionBusy = 'thinking';
+      try {
+        await this.run(`node -e "const f=process.env.HOME+'/.claude/settings.json';const fs=require('fs');const s=JSON.parse(fs.readFileSync(f,'utf8'));s.alwaysThinkingEnabled=${ next ? 'true' : 'false' };fs.writeFileSync(f,JSON.stringify(s,null,2)+'\\n')"`);
+        this.thinking = next;
+      } catch (e) {
+        this.error = e.message || String(e);
+      } finally {
+        this.optionBusy = '';
+      }
+    },
+
+    setLook(key, value) {
+      this.look = { ...this.look, [key]: value };
+      try {
+        localStorage.setItem(LOOK_KEY, JSON.stringify(this.look));
+      } catch { /* a browser without storage keeps it for this visit */ }
+    },
+
     /** Send a message the pane never recorded, again. */
     async resend(p) {
       this.pending = this.pending.filter((x) => x.key !== p.key);
@@ -1351,7 +1485,7 @@ export default {
     },
 
     toggleTool(id) {
-      this.openTools = { ...this.openTools, [id]: !this.openTools[id] };
+      this.openTools = { ...this.openTools, [id]: !this.toolOpen(id) };
     },
 
     /**
@@ -1489,7 +1623,15 @@ export default {
     },
 
     toggleThought(key) {
-      this.openThoughts = { ...this.openThoughts, [key]: !this.openThoughts[key] };
+      this.openThoughts = { ...this.openThoughts, [key]: !this.thoughtOpen(key) };
+    },
+
+    thoughtOpen(key) {
+      return key in this.openThoughts ? this.openThoughts[key] : this.look.thoughts;
+    },
+
+    toolOpen(id) {
+      return id in this.openTools ? this.openTools[id] : this.look.toolIo;
     },
 
     when(iso) {
@@ -1642,6 +1784,7 @@ export default {
     :data-polled="polledAt"
     :data-entries="entries.length"
     :data-file="file"
+    :class="[`mc-chat--${ look.size }`, `mc-chat--${ look.density }`, { 'mc-chat--flat': !look.bubbles, 'mc-chat--no-times': !look.times }]"
     @drop="onDrop"
     @dragover.prevent
   >
@@ -1766,10 +1909,10 @@ export default {
             class="mc-chat__disclose"
             @click="toggleThought(m.key)"
           >
-            {{ openThoughts[m.key] ? '▾' : '▸' }} Thinking
+            {{ thoughtOpen(m.key) ? '▾' : '▸' }} Thinking
           </button>
           <pre
-            v-if="openThoughts[m.key]"
+            v-if="thoughtOpen(m.key)"
             class="mc-chat__pre"
           >{{ m.thinking }}</pre>
         </div>
@@ -1810,7 +1953,7 @@ export default {
           <button
             type="button"
             class="mc-chat__disclose"
-            :aria-expanded="openTools[t.id] ? 'true' : 'false'"
+            :aria-expanded="toolOpen(t.id) ? 'true' : 'false'"
             @click="toggleTool(t.id)"
           >
             <span class="mc-chat__tool-name">{{ t.name }}</span>
@@ -1824,10 +1967,15 @@ export default {
             >…</span>
           </button>
           <div
-            v-if="openTools[t.id]"
+            v-if="toolOpen(t.id)"
             class="mc-chat__tool-detail"
           >
+            <span class="mc-chat__io">IN</span>
             <pre class="mc-chat__pre">{{ JSON.stringify(t.input, null, 2) }}</pre>
+            <span
+              v-if="t.result !== undefined"
+              class="mc-chat__io"
+            >OUT</span>
             <pre
               v-if="t.result !== undefined"
               class="mc-chat__pre mc-chat__pre--result"
@@ -2054,6 +2202,164 @@ export default {
       is a property of the model, and a second button on the bar for it said otherwise.
     -->
     <div
+      v-if="menu === 'actions'"
+      class="mc-chat__menu mc-chat__menu--actions"
+    >
+      <p class="mc-chat__menu-head">
+        Context
+      </p>
+      <button
+        type="button"
+        class="mc-chat__menu-item"
+        @click="$refs.filePick.click(); menu = ''"
+      >
+        <span class="mc-chat__menu-name">Attach file…</span>
+        <span class="mc-chat__menu-note">uploaded to the pod, path put in the message</span>
+      </button>
+      <button
+        type="button"
+        class="mc-chat__menu-item"
+        @click="openFiles"
+      >
+        <span class="mc-chat__menu-name">Mention file from this project…</span>
+        <span class="mc-chat__menu-note">@path</span>
+      </button>
+      <button
+        type="button"
+        class="mc-chat__menu-item"
+        @click="command('/compact')"
+      >
+        <span class="mc-chat__menu-name">Compact conversation</span>
+        <span class="mc-chat__menu-note">/compact</span>
+      </button>
+      <button
+        type="button"
+        class="mc-chat__menu-item"
+        @click="clearConversation"
+      >
+        <span class="mc-chat__menu-name">Clear conversation</span>
+        <span class="mc-chat__menu-note">/clear</span>
+      </button>
+      <button
+        type="button"
+        class="mc-chat__menu-item"
+        @click="openManager('rewind')"
+      >
+        <span class="mc-chat__menu-name">Rewind…</span>
+        <span class="mc-chat__menu-note">in the terminal</span>
+      </button>
+      <p class="mc-chat__menu-head">
+        Model
+      </p>
+      <button
+        type="button"
+        class="mc-chat__menu-item"
+        @click="menu = 'model'"
+      >
+        <span class="mc-chat__menu-name">Switch model…</span>
+        <span class="mc-chat__menu-note">{{ options.model || state.model }}<template v-if="options.effort"> · {{ options.effort }}</template></span>
+      </button>
+      <button
+        type="button"
+        class="mc-chat__menu-item"
+        :disabled="thinking === null || optionBusy === 'thinking'"
+        @click="toggleThinking"
+      >
+        <span class="mc-chat__menu-name">Thinking</span>
+        <span class="mc-chat__menu-note">{{ thinking === null ? '…' : thinking ? 'on' : 'off' }}</span>
+      </button>
+      <p class="mc-chat__menu-head">
+        Account
+      </p>
+      <button
+        type="button"
+        class="mc-chat__menu-item"
+        @click="command('/usage')"
+      >
+        <span class="mc-chat__menu-name">Account &amp; usage</span>
+        <span class="mc-chat__menu-note">/usage<template v-if="state.cost && state.cost.totalCostUSD"> · ${{ state.cost.totalCostUSD.toFixed(2) }} this session</template></span>
+      </button>
+      <button
+        type="button"
+        class="mc-chat__menu-item"
+        @click="command('/status')"
+      >
+        <span class="mc-chat__menu-name">Status</span>
+        <span class="mc-chat__menu-note">/status</span>
+      </button>
+      <p class="mc-chat__menu-head">
+        Appearance
+      </p>
+      <div class="mc-chat__look">
+        <span class="mc-chat__look-label">Text</span>
+        <button
+          v-for="v in ['small', 'medium', 'large']"
+          :key="v"
+          type="button"
+          class="mc-chat__effort"
+          :class="{ 'mc-chat__effort--on': look.size === v }"
+          @click="setLook('size', v)"
+        >
+          {{ v }}
+        </button>
+      </div>
+      <div class="mc-chat__look">
+        <span class="mc-chat__look-label">Spacing</span>
+        <button
+          v-for="v in ['compact', 'comfortable']"
+          :key="v"
+          type="button"
+          class="mc-chat__effort"
+          :class="{ 'mc-chat__effort--on': look.density === v }"
+          @click="setLook('density', v)"
+        >
+          {{ v }}
+        </button>
+      </div>
+      <button
+        v-for="t in lookToggles"
+        :key="t.key"
+        type="button"
+        class="mc-chat__menu-item"
+        @click="setLook(t.key, !look[t.key])"
+      >
+        <span class="mc-chat__menu-tick">{{ look[t.key] ? '✓' : '' }}</span>
+        <span class="mc-chat__menu-name">{{ t.label }}</span>
+      </button>
+    </div>
+    <div
+      v-if="files.open"
+      class="mc-chat__menu mc-chat__menu--files"
+    >
+      <p class="mc-chat__menu-head">
+        Mention a file<span class="mc-chat__menu-note">{{ files.loading ? 'reading the checkout…' : `${ files.list.length } files` }}</span>
+      </p>
+      <input
+        ref="fileFilter"
+        v-model="files.filter"
+        type="text"
+        class="mc-chat__file-filter"
+        placeholder="Filter by path"
+        @keydown.escape.prevent="files.open = false"
+        @keydown.enter.prevent="fileMatches[0] && mention(fileMatches[0])"
+      >
+      <button
+        v-for="f in fileMatches"
+        :key="f"
+        type="button"
+        class="mc-chat__menu-item mc-chat__menu-item--file"
+        @click="mention(f)"
+      >
+        <span class="mc-chat__menu-name">{{ f }}</span>
+      </button>
+      <p
+        v-if="!files.loading && !fileMatches.length"
+        class="mc-chat__menu-note mc-chat__menu-empty"
+      >
+        Nothing matches.
+      </p>
+    </div>
+    <div
       v-if="menu === 'model'"
       class="mc-chat__menu"
     >
@@ -2212,6 +2518,23 @@ export default {
         @blur="focused = false"
       />
       <div class="mc-chat__bar">
+        <!-- The actions menu: what the desktop chat keeps under its "+", backed by the CLI. -->
+        <button
+          type="button"
+          class="mc-chat__pill mc-chat__pill--icon"
+          :class="{ 'mc-chat__pill--on': menu === 'actions' }"
+          title="Attach, mention a file, clear, model, usage, appearance"
+          @click="toggleMenu('actions')"
+        >
+          +
+        </button>
+        <input
+          ref="filePick"
+          type="file"
+          multiple
+          class="mc-chat__hidden"
+          @change="attachPicked"
+        >
         <!-- The model, and the effort level, which the picker carries as a row of its own. -->
         <button
           v-if="options.read"
@@ -2405,6 +2728,61 @@ export default {
     font-weight: 600;
     margin:      0 0 4px;
   }
+
+  &__hidden { display: none; }
+
+  &__menu--actions, &__menu--files {
+    max-height: min(60vh, 520px);
+    overflow-y: auto;
+
+    .mc-chat__menu-item { justify-content: space-between; }
+    .mc-chat__menu-note { margin-left: auto; padding-left: 12px; white-space: nowrap; }
+  }
+
+  &__menu-item--file .mc-chat__menu-name { font-family: monospace; font-size: 11px; }
+
+  &__file-filter {
+    width:         100%;
+    box-sizing:    border-box;
+    margin:        2px 0 6px;
+    padding:       5px 8px;
+    border:        1px solid var(--border);
+    border-radius: 6px;
+    background:    var(--body-bg);
+    color:         var(--body-text);
+    font-size:     12px;
+  }
+
+  &__menu-empty { padding: 6px 8px; }
+
+  &__look {
+    display:     flex;
+    align-items: center;
+    gap:         4px;
+    padding:     2px 8px 6px;
+  }
+
+  &__look-label {
+    color:     var(--muted);
+    font-size: 11px;
+    min-width: 56px;
+  }
+
+  &__io {
+    display:        inline-block;
+    margin:         4px 0 2px;
+    color:          var(--muted);
+    font-size:      9px;
+    letter-spacing: 0.08em;
+    font-family:    monospace;
+  }
+
+  /* Appearance: each preference is one class on the root. */
+  &--small { font-size: 11px; .mc-chat__body { font-size: 11px; } }
+  &--large { font-size: 14px; .mc-chat__body { font-size: 14px; } }
+  &--compact { .mc-chat__msg { margin: 4px 0; } .mc-chat__meta { margin-bottom: 1px; } }
+  &--flat { .mc-chat__msg--user .mc-chat__body { background: transparent; border: 0; padding-left: 0; } }
+  &--no-times { .mc-chat__when { display: none; } }
 
   &__option-desc {
     display:   block;
