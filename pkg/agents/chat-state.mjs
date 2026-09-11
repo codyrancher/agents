@@ -85,6 +85,9 @@ export function isPromptEntry(entry) {
   if (/^<(local-command-|command-)/.test(text)) {
     return false;
   }
+  // A background task's completion (`<task-notification>`) is a user line too, and it does
+  // start a turn - claude picks the result up and works - so it counts here, for the phase.
+  // It is not the person speaking, and the chat shows it as a note (chat.ts, noteFrom).
 
   return true;
 }

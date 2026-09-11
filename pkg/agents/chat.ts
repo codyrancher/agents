@@ -197,6 +197,20 @@ function noteFrom(text: string): string | null {
   if (/^\[Request interrupted by user/.test(text)) {
     return 'Interrupted';
   }
+  // A background command's completion, which the CLI hands claude as a user line - so the
+  // person's own name was on "Background command … completed (exit code 0)". A note, saying
+  // what finished; the same for a system reminder, which is the CLI's too.
+  if (/^\s*<task-notification>/.test(text)) {
+    const summary = /<summary>([\s\S]*?)<\/summary>/.exec(text)?.[1]?.trim() || '';
+    const status = /<status>([^<]*)<\/status>/.exec(text)?.[1]?.trim() || 'completed';
+    const quoted = /Background command "([\s\S]*?)" (?:completed|failed|was stopped)/.exec(summary)?.[1] || '';
+    const what = (quoted || summary).replace(/\s+/g, ' ').trim();
+
+    return `Background task ${ status }: ${ what.length > 160 ? `${ what.slice(0, 157) }…` : what }`;
+  }
+  if (/^\s*<system-reminder>/.test(text)) {
+    return 'System reminder';
+  }
   if (!/^<(local-command-stdout|local-command-stderr|command-name|command-message)/.test(text)) {
     return null;
   }
