@@ -1311,7 +1311,14 @@ export default {
       } catch {
         return;
       }
+      // Nothing to show, or only the shell complaining (a pod still installing its tools
+      // answers "tmux: command not found"): that is an error for the status line, not a panel.
       if (!fresh.length) {
+        return;
+      }
+      if (fresh.length <= 2 && /command not found|No such file|error/i.test(fresh.join('\n'))) {
+        this.error = fresh.join(' ');
+
         return;
       }
       this.panel = { title: command, text: fresh.join('\n') };

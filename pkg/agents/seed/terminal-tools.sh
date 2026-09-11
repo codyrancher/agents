@@ -148,9 +148,18 @@ if ! command -v tmux >/dev/null 2>&1; then
     # mirror to an IPv6 address it has no route to, and apt has no timeout of its own - one
     # `update` sat there for twenty-five minutes with every terminal in the pod queued behind
     # it, each printing that it was waiting for an install.
-    APT="apt-get -o Acquire::ForceIPv4=true -o Acquire::http::Timeout=20 -o Acquire::Retries=1 -o DPkg::Lock::Timeout=60"
-    $APT update -qq || true
-    $APT install -y -qq tmux </dev/null || echo "[tools] tmux did not install; the pane cannot run without it"
+    # Bounded, and tried twice. The timeouts on the apt options cover the HTTP fetch and nothing
+    # else: after a pod restart `apt-get update` sat for twenty minutes inside gpgv, and every
+    # conversation in the pod read "Not running" until somebody killed it by hand. A pane cannot
+    # run without tmux, so this is the one install that must not be allowed to hang.
+    APT="timeout 150 apt-get -o Acquire::ForceIPv4=true -o Acquire::http::Timeout=20 -o Acquire::Retries=1 -o DPkg::Lock::Timeout=60"
+    for attempt in 1 2; do
+      $APT update -qq </dev/null || true
+      $APT install -y -qq tmux </dev/null && break
+      echo "[tools] tmux did not install (attempt $attempt)"
+      sleep 5
+    done
+    command -v tmux >/dev/null 2>&1 || echo "[tools] tmux did not install; the pane cannot run without it"
   fi
 fi
 
