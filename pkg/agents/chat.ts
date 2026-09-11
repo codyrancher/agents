@@ -107,7 +107,7 @@ export function parseTranscript(lines: string[]): ChatMessage[] {
       // The CLI puts `[Image #1]` where a pasted image path was; the image itself is shown
       // beside the text, so the marker is furniture here.
       const text = blocks.filter((b) => b.type === 'text').map((b) => String(b.text || '')).join('\n')
-        .replace(images.length ? /\[Image #\d+\]\s*/g : /$^/, '').trim();
+        .replace(images.length ? /\[Image[^\]]*\]\s*/g : /$^/, '').trim();
 
       // A user line that is only tool results is not something the person said.
       if (!text && !images.length) {

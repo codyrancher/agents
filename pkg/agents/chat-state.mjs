@@ -481,13 +481,13 @@ export function deriveState(input) {
  *
  * The CLI rewrites what was typed before it records it. An image path pasted into the box -
  * the chat's own screenshots go in as `/workspace/.images/….png` - is read, replaced by
- * `[Image #1]` and moved to the front, so the text sent and the text recorded differ exactly
- * there, and an exact match said "not delivered - send again" of a message claude was already
+ * `[Image #1]` (or `[Image: source: …]`) and moved to the front, so the text sent and the text
+ * recorded differ exactly there, and an exact match said "not delivered - send again" of a message claude was already
  * answering. Both sides lose the image marks, the image paths and the spacing between.
  */
 export function promptKey(text) {
   return String(text || '')
-    .replace(/\[Image #\d+\]/g, ' ')
+    .replace(/\[Image[^\]]*\]/g, ' ')
     .replace(/(^|\s)\/\S+\.(png|jpe?g|gif|webp|bmp)(?=\s|$)/gi, ' ')
     .replace(/\s+/g, ' ')
     .trim();
