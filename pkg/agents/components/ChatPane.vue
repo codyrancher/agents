@@ -1326,6 +1326,92 @@ export default {
       }
     },
 
+    /** A menu action that is a slash command: sent as typed, with the terminal's answer shown. */
+    async command(text) {
+      this.menu = '';
+      this.draft = text;
+      await this.send();
+    },
+
+    async clearConversation() {
+      this.menu = '';
+      // eslint-disable-next-line no-alert
+      if (!window.confirm('Clear this conversation? claude forgets everything said so far.')) {
+        return;
+      }
+      await this.command('/clear');
+    },
+
+    /** Files chosen with the Attach button: images shrink as pasted ones do, anything else goes as it is. */
+    attachPicked(event) {
+      for (const file of [...(event.target.files || [])]) {
+        this.attachImage(file);
+      }
+      event.target.value = '';
+      this.$nextTick(() => this.$refs.box?.focus());
+    },
+
+    /** The checkout's files, for the mention picker: what git tracks plus what it has not been told to ignore. */
+    async openFiles() {
+      this.menu = '';
+      this.files = {
+        ...this.files, open: true, loading: true, filter: '',
+      };
+      this.$nextTick(() => this.$refs.fileFilter?.focus());
+      try {
+        const out = await this.run(`cd ${ JSON.stringify(this.workdir) } && (git ls-files --cached --others --exclude-standard 2>/dev/null || find . -type f -not -path '*/node_modules/*' -not -path '*/.git/*' | sed 's|^./||') | head -n 4000`, 30000);
+
+        this.files = { ...this.files, list: out.split('\n').map((l) => l.trim()).filter(Boolean), loading: false };
+      } catch (e) {
+        this.files = { ...this.files, loading: false };
+        this.error = e.message || String(e);
+      }
+    },
+
+    mention(path) {
+      const at = `@${ path }`;
+
+      this.draft = `${ this.draft }${ this.draft && !this.draft.endsWith(' ') ? ' ' : '' }${ at } `;
+      this.files = { ...this.files, open: false };
+      this.$nextTick(() => this.$refs.box?.focus());
+    },
+
+    /**
+     * Whether claude thinks before answering, read from and written to the pane's own
+     * settings.json - the same key /config's "Thinking mode" flips. claude reads it at the
+     * start of each turn, so the change applies to the next message.
+     */
+    async readThinking() {
+      try {
+        const out = await this.run(`node -e "const s=require(process.env.HOME+'/.claude/settings.json');console.log(s.alwaysThinkingEnabled===false?'off':'on')" 2>/dev/null || echo on`);
+
+        this.thinking = !/off/.test(out);
+      } catch {
+        this.thinking = null;
+      }
+    },
+
+    async toggleThinking() {
+      const next = !this.thinking;
+
+      this.optionBusy = 'thinking';
+      try {
+        await this.run(`node -e "const f=process.env.HOME+'/.claude/settings.json';const fs=require('fs');const s=JSON.parse(fs.readFileSync(f,'utf8'));s.alwaysThinkingEnabled=${ next ? 'true' : 'false' };fs.writeFileSync(f,JSON.stringify(s,null,2)+'\\n')"`);
+        this.thinking = next;
+      } catch (e) {
+        this.error = e.message || String(e);
+      } finally {
+        this.optionBusy = '';
+      }
+    },
+
+    setLook(key, value) {
+      this.look = { ...this.look, [key]: value };
+      try {
+        localStorage.setItem(LOOK_KEY, JSON.stringify(this.look));
+      } catch { /* a browser without storage keeps it for this visit */ }
+    },
+
     /** Send a message the pane never recorded, again. */
     async resend(p) {
       this.pending = this.pending.filter((x) => x.key !== p.key);
@@ -2729,7 +2815,7 @@ export default {
     max-height: min(60vh, 520px);
     overflow-y: auto;
 
-    .mc-chat__menu-item { justify-content: space-between; }
+    .mc-chat__menu-item { justify-content: flex-start; gap: 8px; }
     .mc-chat__menu-note { margin-left: auto; padding-left: 12px; white-space: nowrap; }
   }
 
