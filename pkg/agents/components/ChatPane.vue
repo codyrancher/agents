@@ -635,7 +635,12 @@ export default {
           `PROJ="$HOME/.claude/projects/${ projectKey(this.workdir) }"`,
           'uuid=$(cat "$(dirname "$HOME")/sessions/$ID.id" 2>/dev/null)',
           'FILE=""',
-          'if [ -n "$uuid" ] && [ -f "$PROJ/$uuid.jsonl" ]; then FILE="$PROJ/$uuid.jsonl"; else FILE=$(ls -t "$PROJ"/*.jsonl 2>/dev/null | head -1); fi',
+          // Without an id file, fall back to the directory's transcript only when there is
+          // exactly one. Conversations share a working directory - every conversation of a
+          // workspace runs in its checkout - so "the newest transcript" was somebody else's
+          // for the seconds before a new conversation's id file landed, and the chat opened on
+          // eighteen messages that were not this conversation's.
+          'if [ -n "$uuid" ] && [ -f "$PROJ/$uuid.jsonl" ]; then FILE="$PROJ/$uuid.jsonl"; elif [ "$(ls "$PROJ"/*.jsonl 2>/dev/null | wc -l)" -eq 1 ]; then FILE=$(ls "$PROJ"/*.jsonl 2>/dev/null | head -1); fi',
           'echo "@@FILE $FILE"',
           'if [ -n "$FILE" ] && [ -f "$FILE" ]; then size=$(wc -c < "$FILE"); echo "@@SIZE $size"; FROM=$OFF; if [ "$OFF" -eq 0 ] && [ "$size" -gt "$CAP" ]; then FROM=$((size - CAP)); fi; if [ "$size" -gt "$FROM" ]; then echo "@@DATA"; tail -c +$((FROM+1)) "$FILE"; echo; echo "@@ENDDATA"; fi; fi',
           // The subagent's transcript sits beside the session's, in a directory named for it. Capped the same way.
@@ -1227,6 +1232,10 @@ export default {
         .map((l) => l.replace(/[│┃]/g, ' ').trimEnd())
         .filter((l) => l.trim() && !seen.has(l.trim()) && !/^\s*❯/.test(l) && !/shift\+tab|esc to interrupt|for shortcuts|bypass permissions/i.test(l) && !/^[\s─╌═┌┐└┘╭╮╰╯▔▁]+$/.test(l));
 
+      // These commands open a panel in the terminal (Settings · Status · Usage · Stats) and it
+      // stays open until Esc. The chat has what it came for; the terminal should not be left
+      // inside a panel that whoever opens it next did not open.
+      this.keys('Escape').catch(() => {});
       if (!fresh.length) {
         return;
       }
