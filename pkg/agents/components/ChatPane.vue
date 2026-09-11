@@ -12,8 +12,7 @@
 // the pod this component is pointed at, or, when it starts with `kubectl exec`, in another pod
 // that pod reaches - and every read and write here is a short exec along the same path.
 import {
-  parseTranscript, renderMarkdown, renderPlain, linkPaths, readPane, toolSummary, projectKey, agentsFrom
-} from '../chat';
+  parseTranscript, renderMarkdown, renderPlain, linkPaths, readPane, toolSummary, projectKey, agentsFrom, noteFrom } from '../chat';
 import { deriveState, parseEntries, sentSeen } from '../chat-state.mjs';
 import {
   modelAliases, flagChoices, parseMcpList, currentModel, isSafeOptionValue
@@ -421,9 +420,14 @@ export default {
 
       // Only on the main conversation: a message typed here goes to claude, never to one of
       // the subagents whose transcript the tabs show.
-      const queued = (this.state.queue || []).map((text, i) => ({
-        key: `queue-${ i }-${ text.slice(0, 24) }`, role: 'user', text, tools: [], thinking: '', images: [], at: '', queued: true, inQueue: true,
-      }));
+      // The CLI queues a background task's completion the same way; that row is a note.
+      const queued = (this.state.queue || []).map((text, i) => {
+        const note = noteFrom(text);
+
+        return {
+          key: `queue-${ i }-${ text.slice(0, 24) }`, role: note !== null ? 'note' : 'user', text: note !== null ? note : text, tools: [], thinking: '', images: [], at: '', queued: true, inQueue: true,
+        };
+      }).filter((m) => m.text);
 
       const extra = [...this.echoes, ...queued, ...this.pending];
 

@@ -69,8 +69,17 @@ export function parseTranscript(lines: string[]): ChatMessage[] {
     // the same, and without this it vanished from the log the moment claude started reading it.
     if (entry?.type === 'attachment' && entry.attachment?.type === 'queued_command') {
       const prompt = String(entry.attachment.prompt || '').trim();
+      // A background task's completion arrives this way too when a turn is running - the CLI
+      // queues it like anything typed - and it is the CLI's line, not the person's.
+      const note = noteFrom(prompt);
 
-      if (prompt) {
+      if (note !== null) {
+        if (note) {
+          messages.push({
+            key: entry.uuid || `${ messages.length }`, role: 'note', text: note, tools: [], thinking: '', images: [], at: entry.timestamp || '',
+          });
+        }
+      } else if (prompt) {
         messages.push({
           key: entry.uuid || `${ messages.length }`, role: 'user', text: prompt, tools: [], thinking: '', images: [], at: entry.timestamp || '',
         });
@@ -193,7 +202,8 @@ const ANSI = /\u001b\[[0-9;]*[A-Za-z]/g;
  * is the interrupt. Everything else in these tags (`<command-message>`, an empty stdout) adds
  * nothing to read.
  */
-function noteFrom(text: string): string | null {
+/** The CLI's own line, as the short note the chat shows for it; null when the text is the person's. */
+export function noteFrom(text: string): string | null {
   if (/^\[Request interrupted by user/.test(text)) {
     return 'Interrupted';
   }
