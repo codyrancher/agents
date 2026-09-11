@@ -885,7 +885,14 @@ export default {
         this.manager = managerIn(text) || this.manager;
         // Recorded before the poll rather than after it: the point of this is that there is
         // never a moment where the box is empty and the log does not have it.
-        this.pending = [...this.pending, {
+        //
+        // Not for a slash command. Those are the CLI's own: some write a local-command line to
+        // the transcript (/model), some print to the terminal only (/cost) and some open a
+        // picker (/mcp) - none of them is ever recorded as a prompt, so one tracked here would
+        // read "not delivered" twenty seconds after doing exactly what it should.
+        const isCommand = /^\//.test(text);
+
+        this.pending = isCommand ? this.pending : [...this.pending, {
           key: `pending-${ Date.now().toString(36) }-${ this.pending.length }`,
           role: 'user',
           text,
