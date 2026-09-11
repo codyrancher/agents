@@ -14,7 +14,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { deriveState, parseEntries, sentSeen } from '/workspace/.chat-state.mjs';
+import { deriveState, isPromptEntry, parseEntries, sentSeen } from '/workspace/.chat-state.mjs';
 
 const SESSION = process.argv[2] || 'verify-1';
 const HOME = process.env.HOME || '/workspace/.home';
@@ -238,6 +238,24 @@ await waitFor('S6 /cost stays idle', (s) => s.state.phase === 'idle', 20000);
 s = sample();
 console.log(`      cost-state: ${ s.state.cost ? `$${ s.state.cost.totalCostUSD.toFixed(4) }` : 'not written yet' }`);
 console.log(`      pane after /cost: ${ JSON.stringify(s.paneText.split('\n').filter((l) => /cost|\$|tokens/i.test(l)).slice(-3)) }`);
+
+// S9: a message with an image in it. The chat's screenshots go into the box as a path, and
+// the CLI records the prompt with the path gone and `[Image #1]` in front - which read as a
+// message that was never delivered while claude was answering it. A real (tiny) PNG, since the
+// CLI only rewrites a path it can read as an image.
+const shot = `/workspace/.images/verify-${ Date.now().toString(36) }.png`;
+
+fs.mkdirSync('/workspace/.images', { recursive: true });
+fs.writeFileSync(shot, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64'));
+const withShot = `Reply with exactly the word SEEN and nothing else. ${ shot }`;
+const t9 = send(withShot);
+
+await waitFor('S9 a message with an image path reads as seen', (s) => sentSeen(withShot, t9, s.entries, s.hook, s.state.queue), 20000);
+s = await waitFor('S9 idle again after it', (s) => s.state.phase === 'idle', 180000);
+console.log(`      recorded as: ${ JSON.stringify((s.entries.filter(isPromptEntry).pop() || {}).message?.content?.[0]?.text || '') }`);
+try {
+  fs.unlinkSync(shot);
+} catch { /* already gone */ }
 
 // S7: interrupting a turn.
 send('Run this shell command: sleep 90');

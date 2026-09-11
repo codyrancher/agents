@@ -476,16 +476,33 @@ export function deriveState(input) {
  * the prompt of a turn, or the hook saw it submitted. Text-equal, and only on or after the
  * moment it was sent; a message that matches nothing for a while was not delivered.
  */
+/**
+ * A prompt's text as it compares, on either side of the CLI.
+ *
+ * The CLI rewrites what was typed before it records it. An image path pasted into the box -
+ * the chat's own screenshots go in as `/workspace/.images/….png` - is read, replaced by
+ * `[Image #1]` and moved to the front, so the text sent and the text recorded differ exactly
+ * there, and an exact match said "not delivered - send again" of a message claude was already
+ * answering. Both sides lose the image marks, the image paths and the spacing between.
+ */
+export function promptKey(text) {
+  return String(text || '')
+    .replace(/\[Image #\d+\]/g, ' ')
+    .replace(/(^|\s)\/\S+\.(png|jpe?g|gif|webp|bmp)(?=\s|$)/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 export function sentSeen(text, sentAt, entries, hook, queue) {
-  const wanted = String(text || '').trim();
+  const wanted = promptKey(text);
 
   if (!wanted) {
     return true;
   }
-  if (queue.some((q) => String(q).trim() === wanted)) {
+  if (queue.some((q) => promptKey(q) === wanted)) {
     return true;
   }
-  if (hook?.event === 'UserPromptSubmit' && String(hook.prompt || '').trim() === wanted && Date.parse(hook.at) >= sentAt - 2000) {
+  if (hook?.event === 'UserPromptSubmit' && promptKey(hook.prompt) === wanted && Date.parse(hook.at) >= sentAt - 2000) {
     return true;
   }
   for (let i = entries.length - 1; i >= 0; i--) {
@@ -495,13 +512,13 @@ export function sentSeen(text, sentAt, entries, hook, queue) {
     if (at && at < sentAt - 2000) {
       break;
     }
-    if (entry.type === 'queue-operation' && entry.operation === 'enqueue' && String(entry.content || '').trim() === wanted) {
+    if (entry.type === 'queue-operation' && entry.operation === 'enqueue' && promptKey(entry.content) === wanted) {
       return true;
     }
-    if (entry.type === 'attachment' && entry.attachment?.type === 'queued_command' && String(entry.attachment.prompt || '').trim() === wanted) {
+    if (entry.type === 'attachment' && entry.attachment?.type === 'queued_command' && promptKey(entry.attachment.prompt) === wanted) {
       return true;
     }
-    if (isPromptEntry(entry) && textOf(entry) === wanted) {
+    if (isPromptEntry(entry) && promptKey(textOf(entry)) === wanted) {
       return true;
     }
   }
