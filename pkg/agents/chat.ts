@@ -534,7 +534,10 @@ const VIDEO_EXT = /\.(webm|mp4|mov|mkv)$/i;
  * a quote or `=`, so a URL's path and an HTML attribute are left alone; ends before whitespace
  * or markup.
  */
-const PATH_RE = /(^|[^\w"'=/:@.-])((?:~|\/(?:workspace|app|tmp|home|root|etc|var|usr|opt|srv|mnt|data))\/[^\s<>"'`)\]&;]*[^\s<>"'`)\]&;.,:!?])/g;
+// `workspaces` as well as `workspace`: a workspace's tree moved to /workspaces/<name>, and
+// for a while every path an agent named there - every recording, every screenshot - was the
+// one kind the log would not open, while /var/lib/... beside it was a link.
+const PATH_RE = /(^|[^\w"'=/:@.-])((?:~|\/(?:workspaces?|app|tmp|home|root|etc|var|usr|opt|srv|mnt|data))\/[^\s<>"'`)\]&;]*[^\s<>"'`)\]&;.,:!?])/g;
 
 export function mediaKind(path: string): 'image' | 'video' | '' {
   return IMAGE_EXT.test(path) ? 'image' : VIDEO_EXT.test(path) ? 'video' : '';
