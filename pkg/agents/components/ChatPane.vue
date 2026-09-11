@@ -263,6 +263,8 @@ export default {
       viewerData:  '',
       /** What the terminal printed for a command the transcript does not record (see TERMINAL_ONLY). */
       echoes:      [],
+      /** When the last poll came back, as ISO: a stalled poll is a view that stopped being true. */
+      polledAt:    '',
       media:       null,
       notice:      '',
       noticeTimer: null,
@@ -666,6 +668,7 @@ export default {
         this.prunePending();
         this.clearManager(this.messages.length > before);
         this.error = '';
+        this.polledAt = new Date().toISOString();
       } catch (e) {
         this.error = e.message || String(e);
       } finally {
@@ -1627,6 +1630,11 @@ export default {
 <template>
   <div
     class="mc-chat"
+    :data-phase="state.phase"
+    :data-hook="hook ? hook.event + (hook.notification ? ':' + hook.notification : '') : ''"
+    :data-polled="polledAt"
+    :data-entries="entries.length"
+    :data-file="file"
     @drop="onDrop"
     @dragover.prevent
   >
