@@ -23,12 +23,15 @@ export interface ChatToolCall {
   /** The tool's answer, once it has one. */
   result?: string;
   resultIsError?: boolean;
+  /** Images the tool returned (a screenshot read back, a Read of a png), as data URLs. */
+  images?: string[];
 }
 
 export interface ChatMessage {
   /** The transcript's own uuid for the line, for keys. */
   key: string;
-  role: 'user' | 'assistant' | 'summary';
+  /** `note` is the CLI talking: a local command and what it printed, an interrupt. */
+  role: 'user' | 'assistant' | 'summary' | 'note';
   /** Text, as written (markdown). */
   text: string;
   /** Tool calls in this assistant turn, results attached as they arrive. */
@@ -77,18 +80,33 @@ export function parseTranscript(lines: string[]): ChatMessage[] {
         if (call) {
           call.result = resultText(result.content);
           call.resultIsError = !!result.is_error;
+          const shots = Array.isArray(result.content) ? result.content.map(imageUrl).filter(Boolean) : [];
+
+          if (shots.length) {
+            call.images = shots;
+          }
         }
       }
 
       const text = blocks.filter((b) => b.type === 'text').map((b) => String(b.text || '')).join('\n').trim();
-      const images = blocks.filter((b) => b.type === 'image').map((b, i) => b.source?.path || `image ${ i + 1 }`);
+      const images = blocks.filter((b) => b.type === 'image').map((b, i) => imageUrl(b) || b.source?.path || `image ${ i + 1 }`);
 
       // A user line that is only tool results is not something the person said.
       if (!text && !images.length) {
         continue;
       }
-      // Claude Code writes the pane's own furniture into some user lines; keep it out.
-      if (/^<(local-command-stdout|command-name|command-message)/.test(text)) {
+      // The CLI's own lines: a slash command, what it printed, an interrupt. Shown as notes
+      // rather than dropped, because `/model sonnet` and what `/cost` said are things the
+      // person wants to see happened - and because dropping them left the log saying nothing
+      // while the terminal said "Set model to Sonnet".
+      const note = noteFrom(text);
+
+      if (note !== null) {
+        if (note) {
+          messages.push({
+            key: entry.uuid || `${ messages.length }`, role: 'note', text: note, tools: [], thinking: '', images: [], at,
+          });
+        }
         continue;
       }
       // A compact's summary arrives as a user line, because that is how it is fed back to the
@@ -134,6 +152,45 @@ export function parseTranscript(lines: string[]): ChatMessage[] {
   }
 
   return messages;
+}
+
+/** An image block as something an <img> can show, or ''. */
+function imageUrl(block: any): string { // eslint-disable-line @typescript-eslint/no-explicit-any
+  const source = block?.type === 'image' ? block.source : null;
+
+  if (source?.type === 'base64' && source.data) {
+    return `data:${ source.media_type || 'image/png' };base64,${ source.data }`;
+  }
+
+  return '';
+}
+
+const ANSI = /\u001b\[[0-9;]*[A-Za-z]/g;
+
+/**
+ * The CLI's own user lines, as a note; '' for one not worth showing; null for a person's line.
+ *
+ * `<command-name>/model</command-name>` with `<command-args>` is the command as typed; a
+ * `<local-command-stdout>` is what it printed, ANSI stripped; `[Request interrupted by user]`
+ * is the interrupt. Everything else in these tags (`<command-message>`, an empty stdout) adds
+ * nothing to read.
+ */
+function noteFrom(text: string): string | null {
+  if (/^\[Request interrupted by user/.test(text)) {
+    return 'Interrupted';
+  }
+  if (!/^<(local-command-stdout|local-command-stderr|command-name|command-message)/.test(text)) {
+    return null;
+  }
+  const name = /<command-name>([^<]*)<\/command-name>/.exec(text)?.[1]?.trim() || '';
+  const args = /<command-args>([\s\S]*?)<\/command-args>/.exec(text)?.[1]?.trim() || '';
+
+  if (name) {
+    return `${ name }${ args ? ` ${ args }` : '' }`;
+  }
+  const out = /<local-command-std(?:out|err)>([\s\S]*?)<\/local-command-std(?:out|err)>/.exec(text)?.[1] || '';
+
+  return out.replace(ANSI, '').trim();
 }
 
 function sameTurn(a: ChatMessage, b: ChatMessage): boolean {

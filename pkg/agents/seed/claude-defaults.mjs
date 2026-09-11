@@ -189,6 +189,11 @@ const changed = [
 
     register('Stop', 'node /seed/claude-credentials.mjs push');
 
+    // What claude is doing, for the chat view: see chat-hook.mjs for why each of these.
+    for (const event of ['SessionStart', 'UserPromptSubmit', 'Stop', 'Notification', 'SessionEnd']) {
+      register(event, 'node /seed/chat-hook.mjs');
+    }
+
     // Provenance: what produced each line of a change, recorded while it is being made. See
     // barn-provenance.mjs for what these three record and, just as importantly, for the four
     // things they deliberately do not claim.

@@ -235,7 +235,9 @@ if [ "$(id -u)" = 0 ]; then
 fi
 
 PANE_PATH="$HOME_DIR/.local/bin:$PATH"
-PANE_ENV="env HOME=$HOME_DIR PATH=$PANE_PATH TERM=xterm-256color MC_RESTART_FLAG=$MC_RESTART_FLAG"
+# MC_SESSION names the pane to claude's hooks (chat-hook.mjs), which otherwise know only the
+# transcript's uuid; the chat view finds a pane's state file by this name.
+PANE_ENV="env HOME=$HOME_DIR PATH=$PANE_PATH TERM=xterm-256color MC_RESTART_FLAG=$MC_RESTART_FLAG MC_SESSION=$SESSION"
 
 if [ -n "$SHELL_PREFIX" ]; then
   PANE_ENV="$PANE_ENV CLAUDE_CODE_SHELL_PREFIX=$SHELL_PREFIX"

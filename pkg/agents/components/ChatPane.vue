@@ -14,6 +14,7 @@
 import {
   parseTranscript, renderMarkdown, renderPlain, linkPaths, readPane, toolSummary, projectKey, agentsFrom
 } from '../chat';
+import { deriveState, parseEntries, sentSeen } from '../chat-state.mjs';
 import {
   modelAliases, flagChoices, parseMcpList, currentModel, isSafeOptionValue
 } from '../chat-options';
@@ -62,6 +63,23 @@ function managerIn(text) {
  * throw outright in a private window or with site data blocked, so every read and write is
  * guarded and an unavailable one simply means the old behaviour.
  */
+/**
+ * Slash commands that answer in the terminal and nowhere else.
+ *
+ * `/model` writes what it did into the transcript as a local-command line, and the chat shows
+ * that as a note. `/cost`, `/usage`, `/status` and the rest print to the pane only - the
+ * transcript has no record they were even typed - so after sending one of these the chat reads
+ * what the pane printed and shows that instead. A person asking what this session cost gets
+ * the same answer in either view.
+ */
+const TERMINAL_ONLY = ['cost', 'usage', 'status', 'context', 'doctor', 'help', 'todos', 'release-notes', 'version'];
+
+function terminalOnly(text) {
+  const match = /^\/([a-z-]+)\b/.exec(String(text || '').trim());
+
+  return !!match && TERMINAL_ONLY.includes(match[1]);
+}
+
 const PENDING_KEY = 'mc-chat.pending';
 
 function readPending(paneId) {
@@ -130,6 +148,52 @@ const BUILTIN_COMMANDS = [
   ['/vim', 'Toggle vim mode'],
 ].map(([name, help]) => ({ name, help, source: 'built-in' }));
 
+/**
+ * The template's view of the state: the same four things it always drew, decided by
+ * chat-state.mjs rather than by the look of the terminal.
+ */
+function paneFromState(state, paneText = '') {
+  const gone = state.phase === 'gone' || state.phase === 'absent';
+  let dialog = null;
+
+  if (state.phase === 'question' && state.question) {
+    const q = state.question;
+    const first = q.questions[0] || {};
+    const options = q.tool === 'ExitPlanMode'
+      ? [{ key: '1', label: 'Yes, proceed', selected: false }, { key: '2', label: 'No, keep planning', selected: false }]
+      : (first.options || []).map((o, i) => ({
+        key: String(i + 1), label: o.label || `option ${ i + 1 }`, description: o.description || '', selected: false,
+      }));
+
+    dialog = {
+      kind:    'options',
+      header:  q.tool === 'ExitPlanMode' ? 'Plan ready' : (first.header || ''),
+      prompt:  q.tool === 'ExitPlanMode' ? q.plan.slice(0, 4000) : String(first.question || ''),
+      options,
+      url:     '',
+    };
+  } else if (state.phase === 'login' && state.login) {
+    dialog = {
+      kind: state.login.kind, prompt: 'Claude needs you to sign in.', options: [], url: state.login.url,
+    };
+  } else if (state.phase === 'waiting') {
+    // claude said it is waiting (the Notification hook) but the transcript has not written the
+    // question yet - it can lag the prompt by minutes. The question is on the screen, though,
+    // and the pane reader knows the shape of a numbered list with the current choice marked;
+    // its options are the same keystrokes, so the buttons work the same. This is the one place
+    // the terminal's look is read for structure, and only while claude itself says to.
+    const seen = readPane(paneText);
+
+    if (seen.dialog && seen.dialog.options.length) {
+      dialog = { ...seen.dialog, header: '' };
+    }
+  }
+
+  return {
+    busy: state.phase === 'working', idle: state.phase === 'idle', gone, dialog, status: state.status || '',
+  };
+}
+
 function b64(text) {
   const bytes = new TextEncoder().encode(text);
   let binary = '';
@@ -170,6 +234,15 @@ export default {
       pane:        {
         busy: false, idle: false, dialog: null, gone: false, status: '',
       },
+      /**
+       * What the conversation is doing, decided from claude's own record rather than from the
+       * look of its terminal: see chat-state.mjs, which is also what the verifier runs. `pane`
+       * above is derived from it for the template.
+       */
+      entries:     [],
+      hook:        null,
+      alive:       false,
+      state:       { phase: 'absent', status: '', queue: [], question: null, login: null, model: '', effort: '', cost: null },
       paneText:    '',
       draft:       '',
       code:        '',
@@ -186,6 +259,10 @@ export default {
       // the one open in the viewer, and where the viewer reads from.
       thumbs:      {},
       viewerPath:  '',
+      /** An image from the transcript itself (a screenshot a tool returned), open large. */
+      viewerData:  '',
+      /** What the terminal printed for a command the transcript does not record (see TERMINAL_ONLY). */
+      echoes:      [],
       media:       null,
       notice:      '',
       noticeTimer: null,
@@ -309,7 +386,13 @@ export default {
 
       // Only on the main conversation: a message typed here goes to claude, never to one of
       // the subagents whose transcript the tabs show.
-      return this.pending.length ? [...this.messages, ...this.pending] : this.messages;
+      const queued = (this.state.queue || []).map((text, i) => ({
+        key: `queue-${ i }-${ text.slice(0, 24) }`, role: 'user', text, tools: [], thinking: '', images: [], at: '', queued: true, inQueue: true,
+      }));
+
+      const extra = [...this.echoes, ...queued, ...this.pending];
+
+      return extra.length ? [...this.messages, ...extra] : this.messages;
     },
 
     /** The subagents with what each last said, the ones still writing first. */
@@ -335,6 +418,8 @@ export default {
         ...m,
         html:      m.role === 'user' ? renderPlain(m.text) : linkPaths(renderMarkdown(m.text)),
         queued:    !!m.queued,
+        inQueue:   !!m.inQueue,
+        failed:    !!m.failed,
         toolRows:  m.tools.map((t) => ({
           ...t, summary: toolSummary(t), summaryHtml: linkPaths(escapeText(toolSummary(t))),
         })),
@@ -487,7 +572,6 @@ export default {
 
   mounted() {
     // Anything typed into this pane and not yet recorded, from a previous visit.
-    this.pending = readPending(this.paneId);
     this.poll();
     this.readCommands();
     this.readOptions();
@@ -558,6 +642,12 @@ export default {
           'if [ -n "$SUB" ] && [ -n "$FILE" ]; then SF="${FILE%.jsonl}/subagents/agent-$SUB.jsonl"; if [ -f "$SF" ]; then ssize=$(wc -c < "$SF"); echo "@@SSIZE $ssize"; SFROM=$SOFF; if [ "$SOFF" -eq 0 ] && [ "$ssize" -gt "$CAP" ]; then SFROM=$((ssize - CAP)); fi; if [ "$ssize" -gt "$SFROM" ]; then echo "@@SDATA"; tail -c +$((SFROM+1)) "$SF"; echo; echo "@@SENDDATA"; fi; fi; fi',
           // Every subagent's last line and when it was written, for the list of them.
           'if [ -n "$FILE" ] && [ -d "${FILE%.jsonl}/subagents" ]; then for f in "${FILE%.jsonl}"/subagents/agent-*.jsonl; do [ -f "$f" ] || continue; id=$(basename "$f" .jsonl); id=${id#agent-}; echo "@@TAIL $id $(stat -c %Y "$f")"; tail -c 6000 "$f" | grep "\"type\":\"assistant\"" | tail -n 1 | cut -c1-3000; done; echo "@@ENDTAILS"; fi',
+          // The hook state file (seed/chat-hook.mjs): the last thing claude said it was doing.
+          'echo "@@HOOK"; cat "$(dirname "$HOME")/sessions/$ID.state.json" 2>/dev/null; echo; echo "@@ENDHOOK"',
+          // Whether a claude process is running in the pane at all. The pane's own command is the
+          // loop that runs claude (claude-session.sh), so claude is its child - and a pane with the
+          // loop but no child is a shell, whatever the transcript's last line says.
+          'if tmux has-session -t "mc-$ID" 2>/dev/null; then P=$(tmux display -p -t "mc-$ID" "#{pane_pid}" 2>/dev/null); [ -n "$P" ] && pgrep -P "$P" -x claude >/dev/null 2>&1 && echo "@@ALIVE"; fi',
           'echo "@@PANE"',
           'if tmux has-session -t "mc-$ID" 2>/dev/null; then tmux capture-pane -p -t "mc-$ID" | tail -n 40; else echo "@@NOPANE"; fi',
         ].join('\n'));
@@ -609,7 +699,10 @@ export default {
         const first = !this.messages.length;
 
         this.offset = size;
-        this.messages = parseTranscript(this.lines.concat(this.remainder.trim() ? [this.remainder] : []));
+        const all = this.lines.concat(this.remainder.trim() ? [this.remainder] : []);
+
+        this.messages = parseTranscript(all);
+        this.entries = parseEntries(all);
         // The first load lands at the bottom, where the conversation is; after that, only
         // while the person is already there, so reading back is not interrupted.
         this.$nextTick(() => this.scrollToEnd(first));
@@ -659,14 +752,29 @@ export default {
         this.tails = tails;
       }
 
+      const hookAt = out.indexOf('@@HOOK\n');
+      const hookEnd = out.indexOf('\n@@ENDHOOK');
+
+      if (hookAt >= 0 && hookEnd > hookAt) {
+        try {
+          const raw = out.slice(hookAt + 7, hookEnd).trim();
+
+          this.hook = raw ? JSON.parse(raw) : null;
+        } catch {
+          // Half-written; the next poll reads a whole one.
+        }
+      }
+
       const paneAt = out.indexOf('@@PANE\n');
       const paneText = paneAt >= 0 ? out.slice(paneAt + 7) : '';
 
       this.attached = !paneText.includes('@@NOPANE');
+      this.alive = this.attached && out.slice(0, paneAt >= 0 ? paneAt : undefined).includes('@@ALIVE');
       this.paneText = paneText;
-      this.pane = this.attached ? readPane(paneText) : {
-        busy: false, idle: false, dialog: null, gone: true, status: '',
-      };
+      this.state = deriveState({
+        entries: this.entries, hook: this.hook, attached: this.attached, alive: this.alive, paneText, now: Date.now(),
+      });
+      this.pane = paneFromState(this.state, paneText);
       this.$emit('state', this.attached ? 'open' : 'waiting');
     },
 
@@ -758,7 +866,12 @@ export default {
         if (!this.attached) {
           await this.start();
         }
+        const before = this.paneText;
+
         await this.say(text);
+        if (terminalOnly(text)) {
+          this.echoTerminal(text, before);
+        }
         // Typing `/mcp` by hand puts the pane into the same state the Customize menu does, so
         // it is recorded the same way rather than only when the menu was used.
         this.manager = managerIn(text) || this.manager;
@@ -1063,36 +1176,71 @@ export default {
       this.slashIndex = n ? (this.slashIndex + direction + n) % n : 0;
     },
 
+    /**
+     * Retire what this box sent once claude has recorded it anywhere - as a queued item, as a
+     * prompt, or as the hook's UserPromptSubmit - and say so when it has not.
+     *
+     * The old version matched sent text against the user turns in the transcript, which retired
+     * a message only once claude *started* on it: everything typed while it was busy sat marked
+     * "queued" until then, and anything the paste did not land at all sat there for ever. Now
+     * the CLI's own queue is drawn from its record (state.queue) and this list is only the gap
+     * between Enter and that record - seconds, or a delivery failure, which is shown as one.
+     */
     prunePending() {
       if (!this.pending.length) {
         return;
       }
-
-      // A pane with no claude in it has no queue to be waiting in, so nothing is pending.
       if (this.pane.gone) {
-        this.pending = [];
+        // No claude to have taken it: the message is not going anywhere from here.
+        this.pending = this.pending.map((p) => ({ ...p, failed: true }));
 
         return;
       }
+      const now = Date.now();
+      const left = this.pending
+        .filter((p) => !sentSeen(p.text, p.sentAt, this.entries, this.hook, this.state.queue))
+        .map((p) => (now - p.sentAt > 20000 && !p.failed ? { ...p, failed: true } : p));
 
-      const said = this.messages
-        .filter((m) => m.role === 'user')
-        .map((m) => ({ text: (m.text || '').trim(), at: Date.parse(m.at || '') || 0 }));
-      const left = this.pending.filter((p) => {
-        // A second of slack: the transcript's clock is the pod's, this one is the browser's.
-        const i = said.findIndex((m) => m.text === p.text && m.at >= p.sentAt - 1000);
-
-        if (i < 0) {
-          return true;
-        }
-        said.splice(i, 1);
-
-        return false;
-      });
-
-      if (left.length !== this.pending.length) {
+      if (left.length !== this.pending.length || left.some((p, i) => p.failed !== this.pending[i]?.failed)) {
         this.pending = left;
       }
+    },
+
+    /**
+     * Read back what the terminal printed for a command that prints only there.
+     *
+     * A little after the send, the pane's new lines - the ones not in the capture taken before
+     * it - minus the prompt row and the status bar. Shown as a note under the log, dated now,
+     * and kept for this visit only: it is the terminal's answer, not the conversation's.
+     */
+    async echoTerminal(command, before) {
+      await new Promise((resolve) => setTimeout(resolve, 1800));
+      let after = '';
+
+      try {
+        after = await this.run(`tmux capture-pane -p -t "mc-${ this.paneId }" | tail -n 60`);
+      } catch {
+        return;
+      }
+      const seen = new Set(before.split('\n').map((l) => l.trim()));
+      const fresh = after.split('\n')
+        .map((l) => l.replace(/[│┃]/g, ' ').trimEnd())
+        .filter((l) => l.trim() && !seen.has(l.trim()) && !/^\s*❯/.test(l) && !/shift\+tab|esc to interrupt|for shortcuts|bypass permissions/i.test(l) && !/^[\s─╌═┌┐└┘╭╮╰╯▔▁]+$/.test(l));
+
+      if (!fresh.length) {
+        return;
+      }
+      this.echoes = [...this.echoes, {
+        key: `echo-${ Date.now().toString(36) }`, role: 'note', text: `${ command }\n${ fresh.join('\n') }`, tools: [], thinking: '', images: [], at: new Date().toISOString(),
+      }];
+      this.$nextTick(() => this.scrollToEnd());
+    },
+
+    /** Send a message the pane never recorded, again. */
+    async resend(p) {
+      this.pending = this.pending.filter((x) => x.key !== p.key);
+      this.draft = p.text;
+      await this.send();
     },
 
     onKeydown(event) {
@@ -1542,18 +1690,33 @@ export default {
         :class="[`mc-chat__msg--${ m.role }`, { 'mc-chat__msg--queued': m.queued }]"
       >
         <div class="mc-chat__meta">
-          <span class="mc-chat__who">{{ m.role === 'user' ? 'You' : m.role === 'summary' ? 'Summary' : 'Claude' }}</span>
-          <span class="mc-chat__when">{{ m.queued ? 'queued' : when(m.at) }}</span>
+          <span class="mc-chat__who">{{ m.role === 'user' ? 'You' : m.role === 'summary' ? 'Summary' : m.role === 'note' ? 'Claude Code' : 'Claude' }}</span>
+          <span class="mc-chat__when">{{ m.failed ? 'not delivered' : m.queued ? 'queued' : when(m.at) }}</span>
           <!--
             Said, rather than shown as an ordinary message, because it is not in the
             conversation yet: claude is mid-turn and has this waiting in its input queue. It
             turns into a normal message the moment the transcript records it.
           -->
           <span
-            v-if="m.queued"
+            v-if="m.failed"
+            class="mc-chat__queued-note mc-chat__queued-note--failed"
+            title="Claude never recorded this message - the paste into the pane did not land"
+          >claude did not receive this ·
+            <button
+              type="button"
+              class="mc-chat__link"
+              @click="resend(m)"
+            >send again</button></span>
+          <span
+            v-else-if="m.inQueue"
             class="mc-chat__queued-note"
-            :title="working ? 'Claude is working; this is next in its queue' : 'Waiting for claude to record this'"
-          >waiting for claude</span>
+            title="In claude's input queue: it starts on this when the current turn ends"
+          >in claude's queue</span>
+          <span
+            v-else-if="m.queued"
+            class="mc-chat__queued-note"
+            title="Sent; waiting for claude to record it"
+          >sending</span>
           <button
             v-if="m.role === 'summary'"
             type="button"
@@ -1601,10 +1764,17 @@ export default {
           class="mc-chat__images"
         >
           <li
-            v-for="image in m.images"
-            :key="image"
+            v-for="(image, i) in m.images"
+            :key="`${ i }-${ image.slice(0, 40) }`"
           >
-            🖼 {{ image }}
+            <img
+              v-if="image.startsWith('data:')"
+              :src="image"
+              class="mc-chat__shot"
+              alt="attached image"
+              @click="viewerData = image"
+            >
+            <template v-else>🖼 {{ image }}</template>
           </li>
         </ul>
         <div
@@ -1638,6 +1808,20 @@ export default {
               v-if="t.result !== undefined"
               class="mc-chat__pre mc-chat__pre--result"
             >{{ t.result.slice(0, 6000) }}{{ t.result.length > 6000 ? '\n…' : '' }}</pre>
+          </div>
+          <!-- An image the tool returned is worth seeing without opening the row. -->
+          <div
+            v-if="t.images && t.images.length"
+            class="mc-chat__shots"
+          >
+            <img
+              v-for="(image, i) in t.images"
+              :key="i"
+              :src="image"
+              class="mc-chat__shot"
+              alt="image the tool returned"
+              @click="viewerData = image"
+            >
           </div>
         </div>
       </div>
@@ -1735,6 +1919,18 @@ export default {
         :home="media.home"
         @close="viewerPath = ''"
       />
+      <div
+        v-if="viewerData"
+        class="mc-chat__lightbox"
+        role="dialog"
+        aria-label="Image"
+        @click="viewerData = ''"
+      >
+        <img
+          :src="viewerData"
+          alt="image"
+        >
+      </div>
     </Teleport>
 
     <!-- What the pane is asking, when it is asking something a text box cannot answer. -->
@@ -1742,6 +1938,10 @@ export default {
       v-if="pane.dialog"
       class="mc-chat__dialog"
     >
+      <div
+        v-if="pane.dialog.header"
+        class="mc-chat__dialog-header"
+      >{{ pane.dialog.header }}</div>
       <pre
         v-if="pane.dialog.prompt"
         class="mc-chat__dialog-prompt"
@@ -1756,9 +1956,14 @@ export default {
           type="button"
           class="mc-chat__option"
           :class="{ 'mc-chat__option--selected': o.selected }"
+          :title="o.description || ''"
           @click="choose(o)"
         >
           <span class="mc-chat__option-key">{{ o.key }}</span> {{ o.label }}
+          <span
+            v-if="o.description"
+            class="mc-chat__option-desc"
+          >{{ o.description }}</span>
         </button>
       </div>
       <div
@@ -1805,7 +2010,18 @@ export default {
           /login
         </button>
       </template>
-      <template v-else>{{ pane.status || 'Ready' }}</template>
+      <template v-else-if="state.phase === 'waiting'">
+        {{ pane.status || 'Claude is waiting for you' }}
+        <button
+          type="button"
+          class="mc-chat__link"
+          title="Answer it in the terminal"
+          @click="$emit('view', 'terminal')"
+        >
+          open the terminal
+        </button>
+      </template>
+      <template v-else>{{ pane.status || 'Ready' }}<template v-if="state.cost && state.cost.totalCostUSD"> · ${{ state.cost.totalCostUSD.toFixed(2) }} this session</template></template>
     </div>
 
     <!--
@@ -2121,6 +2337,56 @@ export default {
     font-size:      10px;
     letter-spacing: 0.04em;
     text-transform: uppercase;
+
+    &--failed { color: var(--error, #d9534f); text-transform: none; letter-spacing: 0; }
+  }
+
+  &__msg--note {
+    opacity: 0.8;
+
+    .mc-chat__body { font-family: monospace; font-size: 11px; white-space: pre-wrap; color: var(--muted); }
+  }
+
+  &__shots {
+    display:   flex;
+    flex-wrap: wrap;
+    gap:       6px;
+    margin:    6px 0 2px;
+  }
+
+  &__shot {
+    max-width:     240px;
+    max-height:    160px;
+    border:        1px solid var(--border);
+    border-radius: 4px;
+    cursor:        zoom-in;
+    object-fit:    contain;
+    background:    var(--body-bg);
+  }
+
+  &__lightbox {
+    position:        fixed;
+    inset:           0;
+    z-index:         1000;
+    background:      rgba(0, 0, 0, 0.8);
+    display:         flex;
+    align-items:     center;
+    justify-content: center;
+    cursor:          zoom-out;
+
+    img { max-width: 96vw; max-height: 96vh; object-fit: contain; }
+  }
+
+  &__dialog-header {
+    font-weight: 600;
+    margin:      0 0 4px;
+  }
+
+  &__option-desc {
+    display:   block;
+    color:     var(--muted);
+    font-size: 11px;
+    margin:    2px 0 0 18px;
   }
 
   &__meta {
