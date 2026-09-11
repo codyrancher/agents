@@ -498,6 +498,9 @@ export function sentSeen(text, sentAt, entries, hook, queue) {
     if (entry.type === 'queue-operation' && entry.operation === 'enqueue' && String(entry.content || '').trim() === wanted) {
       return true;
     }
+    if (entry.type === 'attachment' && entry.attachment?.type === 'queued_command' && String(entry.attachment.prompt || '').trim() === wanted) {
+      return true;
+    }
     if (isPromptEntry(entry) && textOf(entry) === wanted) {
       return true;
     }

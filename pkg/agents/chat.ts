@@ -63,6 +63,21 @@ export function parseTranscript(lines: string[]): ChatMessage[] {
       continue;
     }
 
+    // A message typed while claude was busy and absorbed into the running turn. The CLI takes
+    // it off its queue ("remove … absorbed_mid_turn") and records it as an attachment of the
+    // turn, timestamped when it was typed - never as a user line. It is the person speaking all
+    // the same, and without this it vanished from the log the moment claude started reading it.
+    if (entry?.type === 'attachment' && entry.attachment?.type === 'queued_command') {
+      const prompt = String(entry.attachment.prompt || '').trim();
+
+      if (prompt) {
+        messages.push({
+          key: entry.uuid || `${ messages.length }`, role: 'user', text: prompt, tools: [], thinking: '', images: [], at: entry.timestamp || '',
+        });
+      }
+      continue;
+    }
+
     if (!entry || (entry.type !== 'user' && entry.type !== 'assistant') || !entry.message) {
       continue;
     }
