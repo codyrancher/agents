@@ -268,10 +268,31 @@ else
   PANE="$PANE_ENV /bin/bash /seed/claude-session.sh '$MC_QUEUE' '$MC_CONVERSATION'"
 fi
 
+# Recorded, so that a pod restart brings the pane back: boot.sh reads these and starts each
+# one detached, and the loop inside resumes the conversation by its id. One file per pane,
+# its arguments one per line, beside the sessions; removed when the conversation is ended
+# (sessions.sh end). A plain shell is not recorded - there is nothing in it to resume.
+if [ "$MODE" != shell ]; then
+  PANES_DIR="$(dirname "$HOME_DIR")/.panes"
+  mkdir -p "$PANES_DIR" 2>/dev/null || true
+  if printf '%s\n' "$SESSION" "$WORKDIR" "$HOME_DIR" start "$SHELL_PREFIX" > "$PANES_DIR/$SESSION.tmp" 2>/dev/null; then
+    mv -f "$PANES_DIR/$SESSION.tmp" "$PANES_DIR/$SESSION" 2>/dev/null || true
+  fi
+  if [ "$(id -u)" = 0 ]; then
+    chown -R node:node "$PANES_DIR" 2>/dev/null || true
+  fi
+fi
+
 if [ "$MODE" = start ]; then
   # -d, not -A: there is no terminal on this call to attach to. Idempotent all
   # the same, because a session that already exists makes this a no-op.
-  if tmux has-session -t "mc-$SESSION" 2>/dev/null; then
+  # Asked as the pane user: the tmux server is theirs, and root asking its own server was
+  # told there was no such session and then failed on the duplicate.
+  if [ "$(id -u)" = 0 ]; then
+    if setpriv --reuid=1000 --regid=1000 --init-groups env "HOME=$HOME_DIR" tmux has-session -t "mc-$SESSION" 2>/dev/null; then
+      exit 0
+    fi
+  elif tmux has-session -t "mc-$SESSION" 2>/dev/null; then
     exit 0
   fi
 

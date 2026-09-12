@@ -34,6 +34,31 @@ fi
 # on the other side, so the two overlapping is a wait rather than two installs.
 HOME_DIR="$AGENT_HOME" /bin/sh /seed/terminal-tools.sh >"$WORKSPACE/.terminal-tools.log" 2>&1 &
 
+# The panes that were running when this pod last went down come back on their own. shell.sh
+# records every conversation pane it starts (/workspace/.panes/<session>: the arguments, one
+# per line); each is started again here, detached, once the tools it needs are installed, and
+# the loop inside resumes the conversation by its id. Before this, a restart - Rancher's or
+# this Deployment's - ended every conversation until somebody opened each one again, and a
+# fix left running overnight was found stopped in the morning. Staggered a little: each start
+# is a claude coming up.
+(
+  n=0
+  while ! command -v tmux >/dev/null 2>&1 || [ ! -x "$AGENT_HOME/.local/bin/claude" ]; do
+    n=$((n + 1))
+    [ "$n" -gt 90 ] && { echo "tools never arrived; not restoring panes"; exit 0; }
+    sleep 10
+  done
+  for f in "$WORKSPACE"/.panes/*; do
+    [ -f "$f" ] || continue
+    S=$(sed -n 1p "$f"); W=$(sed -n 2p "$f"); H=$(sed -n 3p "$f"); P=$(sed -n 5p "$f")
+    [ -n "$S" ] || continue
+    echo "$(date -u +%FT%TZ) restoring pane $S in $W"
+    /bin/sh /seed/shell.sh "$S" "$W" "$H" start "$P" || echo "  could not restore $S"
+    sleep 2
+  done
+  echo "$(date -u +%FT%TZ) done"
+) >"$WORKSPACE/.panes.log" 2>&1 &
+
 # The container's only remaining job is to stay up so there is something to exec into. `tail -f`
 # on /dev/null is the smallest thing that does that and says nothing; a `sleep` with a number on
 # it would end, and a pod that ends is a pod Kubernetes restarts for no reason.

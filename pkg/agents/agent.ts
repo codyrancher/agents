@@ -84,14 +84,28 @@ export function agentSourceFiles(): Record<string, string> {
  * A fingerprint of that source, for the same reason the service has one.
  *
  * A pod created once and then left alone keeps whatever source it was first given for ever, and
- * nothing reports the mismatch. It goes on the ConfigMap, on the Deployment (which is what
- * ensureCurrent compares) and on the pod template (which is what makes a changed script
- * actually roll the pod, since /seed is a mounted volume nothing re-reads).
+ * nothing reports the mismatch. It goes on the ConfigMap and on the Deployment (which is what
+ * ensureCurrent compares); the pod template carries agentBootVersion instead, so that only a
+ * change to what boot runs once rolls the pod.
  */
 export function agentSourceVersion(): string {
   const files = agentSourceFiles();
 
   return contentVersion(Object.keys(files).sort().flatMap((key) => [key, files[key]]));
+}
+
+/**
+ * The part of that source a running pod cannot pick up: what boot.sh runs once. Everything
+ * else in /seed is read again on every pane start (shell.sh and what it calls), and the
+ * ConfigMap volume it is mounted from updates in place, so a changed script reaches the next
+ * pane without a restart. Rolling the pod for those ended every conversation in it on every
+ * publish. This goes on the pod template instead, so only a change to the boot itself rolls it.
+ */
+export function agentBootVersion(): string {
+  const files = agentSourceFiles();
+  const boot = ['boot.sh', 'terminal-tools.sh', 'tmux.conf'].filter((key) => key in files);
+
+  return contentVersion(boot.flatMap((key) => [key, files[key]]));
 }
 
 export function agentConfigMapBody(): Record<string, unknown> {
@@ -127,7 +141,7 @@ export function agentDeploymentBody(): Record<string, unknown> {
       template: {
         metadata: {
           labels:      { app: AGENT_OBJECT },
-          annotations: { [VERSION_ANNOTATION]: agentSourceVersion() },
+          annotations: { [VERSION_ANNOTATION]: agentBootVersion() },
         },
         spec: {
           // The same account every pod here runs as, and here it is used rather than declared:

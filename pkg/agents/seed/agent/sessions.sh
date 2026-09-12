@@ -184,6 +184,9 @@ case "$VERB" in
 
     tmux kill-session -t "mc-$ID" 2>/dev/null || true
 
+    # And the pane's record, or boot.sh would bring it back after the next restart.
+    rm -f "$(dirname "$SESSIONS")/.panes/$ID"
+
     # The directory as well as the session, because the directory is what `new` allocates
     # against. Left behind it would be a name that can never be reused and a conversation that
     # comes back from the dead the next time that name is handed out.

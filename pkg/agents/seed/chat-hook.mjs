@@ -69,6 +69,16 @@ if (payload.stop_hook_active !== undefined) {
 try {
   fs.mkdirSync(DIR, { recursive: true });
   const state = path.join(DIR, `${ SESSION }.state.json`);
+
+  // Which transcript this pane is on, from the one place that knows for certain. The pane's
+  // loop (claude-session.sh) learns it by watching for a new transcript file, which misses
+  // when two appear or none does, and a pane without the file resumes by `--continue`'s guess.
+  // Every SessionStart - a start, a resume, a /clear - names the current one.
+  if (event.event === 'SessionStart' && event.sessionId) {
+    try {
+      fs.writeFileSync(path.join(DIR, `${ SESSION }.id`), `${ event.sessionId }\n`);
+    } catch { /* the loop's own watcher is the fallback */ }
+  }
   const tmp = `${ state }.${ process.pid }`;
 
   // Rename, so a reader never sees half a file.
