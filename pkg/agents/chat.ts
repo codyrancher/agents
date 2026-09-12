@@ -90,6 +90,12 @@ export function parseTranscript(lines: string[]): ChatMessage[] {
     if (!entry || (entry.type !== 'user' && entry.type !== 'assistant') || !entry.message) {
       continue;
     }
+    // The CLI's own user lines, marked so: beside a message with a pasted image it writes a
+    // second one, `[Image: source: /workspace/.images/….png]`, which showed as the person
+    // sending the same thing twice.
+    if (entry.isMeta === true) {
+      continue;
+    }
 
     const content = entry.message.content;
     const blocks: any[] = typeof content === 'string' ? [{ type: 'text', text: content }] : (Array.isArray(content) ? content : []); // eslint-disable-line @typescript-eslint/no-explicit-any

@@ -62,7 +62,9 @@ function textOf(entry) {
 
 /** A user line that is the person (or a queued prompt) speaking - not a tool result, not the CLI's furniture. */
 export function isPromptEntry(entry) {
-  if (entry.type !== 'user') {
+  if (entry.type !== 'user' || entry.isMeta === true) {
+    // isMeta: the CLI's own line (the `[Image: source: …]` companion of a pasted image), not
+    // the person's and not a turn of its own.
     return false;
   }
   const blocks = blocksOf(entry);
