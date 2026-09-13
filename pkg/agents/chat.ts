@@ -16,6 +16,8 @@
 // Everything here is pure: given text, it answers with structure. ChatPane.vue does the
 // fetching and the sending.
 
+import { highlight } from './highlight';
+
 export interface ChatToolCall {
   id: string;
   name: string;
@@ -352,7 +354,7 @@ export function renderMarkdown(text: string): string {
         code.push(lines[i++]);
       }
       i++;
-      out.push(`<pre><code${ fence[1] ? ` class="lang-${ escapeHtml(fence[1]) }"` : '' }>${ escapeHtml(code.join('\n')) }</code></pre>`);
+      out.push(`<pre><code class="hljs${ fence[1] ? ` lang-${ escapeHtml(fence[1]) }` : '' }">${ highlight(code.join('\n'), fence[1] || '') }</code></pre>`);
       continue;
     }
 

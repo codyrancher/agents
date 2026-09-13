@@ -1,5 +1,8 @@
 <script>
 import { statPodPath, listPodDir, readPodFileBase64 } from '../pod';
+import { renderMarkdown } from '../chat';
+import { highlight, languageFor, looksLikeDiff } from '../highlight';
+import { readLook, writeLook } from '../look';
 
 // What a browser can show inline. Anything else is named and sized rather than guessed at.
 const IMAGE = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico'];
@@ -38,6 +41,8 @@ export default {
     return {
       current: this.path, kind: '', size: 0, entries: [], text: '', dataUrl: '',
       loading: true, error: '',
+      /** Rendered (markdown as a page, code and diffs highlighted) or raw: the shared look's choice. */
+      mode: readLook().files,
       // Zoom is a scale about a point, not a two-state toggle: the whole reason to open a
       // screenshot from a terminal is to read the small print in one corner of it.
       scale: 1, panX: 0, panY: 0, dragging: false, dragX: 0, dragY: 0,
@@ -71,6 +76,33 @@ export default {
     isPdf() {
       return this.extension === 'pdf';
     },
+    isMarkdown() {
+      return ['md', 'markdown', 'mdx'].includes(this.extension);
+    },
+
+    /** The language the text is highlighted in when rendered; a diff is a diff whatever its name. */
+    language() {
+      if (looksLikeDiff(this.text)) {
+        return 'diff';
+      }
+
+      return languageFor(this.current);
+    },
+
+    /** Rendered text: markdown as HTML, else code highlighted. Escaped either way. */
+    rendered() {
+      if (this.isMarkdown) {
+        return renderMarkdown(this.text);
+      }
+
+      return highlight(this.text, this.language);
+    },
+
+    /** Whether rendering would change anything for this file - a plain text file is the same both ways. */
+    renderable() {
+      return this.isMarkdown || !!this.language;
+    },
+
     parent() {
       const trimmed = this.current.replace(/\/+$/, '');
       const at = trimmed.lastIndexOf('/');
@@ -180,6 +212,12 @@ export default {
     open(entry) {
       this.current = `${ this.current.replace(/\/+$/, '') }/${ entry.name }`;
     },
+
+    /** The choice is the shared look's, so every pane's viewer opens the same way next time. */
+    setMode(mode) {
+      this.mode = mode;
+      writeLook({ ...readLook(), files: mode });
+    },
   },
 };
 </script>
@@ -216,6 +254,23 @@ export default {
           v-if="isImage"
           class="text-muted pfv__zoom"
         >{{ Math.round(scale * 100) }}%</span>
+        <span
+          v-if="kind === 'file' && text && renderable"
+          class="pfv__modes"
+          role="group"
+          aria-label="How to show the file"
+        >
+          <button
+            v-for="m in ['rendered', 'raw']"
+            :key="m"
+            type="button"
+            class="btn btn-sm"
+            :class="mode === m ? 'role-primary' : 'role-tertiary'"
+            @click="setMode(m)"
+          >
+            {{ m }}
+          </button>
+        </span>
         <button
           class="btn role-tertiary btn-sm pfv__close"
           @click="$emit('close')"
@@ -291,6 +346,18 @@ export default {
           :src="dataUrl"
           class="pfv__pdf"
         />
+        <div
+          v-else-if="mode === 'rendered' && isMarkdown"
+          class="pfv__md"
+          v-html="rendered"
+        />
+        <pre
+          v-else-if="mode === 'rendered' && language"
+          class="pfv__text"
+        ><code
+          class="hljs"
+          v-html="rendered"
+        /></pre>
         <pre
           v-else
           class="pfv__text"
@@ -433,6 +500,31 @@ export default {
   width: 100%;
   height: 72vh;
   border: none;
+}
+
+.pfv__modes {
+  display: inline-flex;
+  gap:     4px;
+  flex:    0 0 auto;
+}
+
+.pfv__md {
+  padding:     4px 8px;
+  line-height: 1.5;
+  max-width:   900px;
+
+  :deep(h1), :deep(h2), :deep(h3), :deep(h4), :deep(h5), :deep(h6) { margin: 16px 0 8px; line-height: 1.25; }
+  :deep(h1) { font-size: 22px; } :deep(h2) { font-size: 19px; } :deep(h3) { font-size: 16px; } :deep(h4), :deep(h5), :deep(h6) { font-size: 14px; }
+  :deep(p) { margin: 0 0 10px; }
+  :deep(ul), :deep(ol) { margin: 0 0 10px; padding-left: 22px; }
+  :deep(li) { margin: 2px 0; }
+  :deep(code) { font-size: 12px; background: var(--box-bg); padding: 1px 4px; border-radius: 3px; }
+  :deep(pre) { background: var(--box-bg); border: 1px solid var(--border); border-radius: var(--border-radius); padding: 8px 10px; overflow-x: auto; }
+  :deep(pre code) { background: transparent; padding: 0; }
+  :deep(table) { border-collapse: collapse; margin: 0 0 10px; }
+  :deep(th), :deep(td) { border: 1px solid var(--border); padding: 4px 8px; }
+  :deep(blockquote) { margin: 0 0 10px; padding-left: 10px; border-left: 3px solid var(--border); color: var(--muted); }
+  :deep(hr) { border: 0; border-top: 1px solid var(--border); margin: 12px 0; }
 }
 
 .pfv__text {

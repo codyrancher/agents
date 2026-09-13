@@ -14,6 +14,7 @@
 import {
   parseTranscript, renderMarkdown, renderPlain, linkPaths, readPane, toolSummary, projectKey, agentsFrom, noteFrom } from '../chat';
 import { deriveState, parseEntries, sentSeen } from '../chat-state.mjs';
+import { readLook, writeLook } from '../look';
 import {
   modelAliases, flagChoices, parseMcpList, currentModel, isSafeOptionValue
 } from '../chat-options';
@@ -80,23 +81,7 @@ function terminalOnly(text) {
 }
 
 /** Appearance preferences: what they are, and what a fresh browser gets. */
-const LOOK_KEY = 'mc-chat.look';
-const LOOK_DEFAULTS = {
-  size:     'medium', // small | medium | large
-  density:  'comfortable', // compact | comfortable
-  bubbles:  true, // user messages in a bubble, or flat like the rest
-  thoughts: false, // thinking rows open by default
-  toolIo:   false, // tool rows open by default
-  times:    true, // timestamps on messages
-};
-
-function readLook() {
-  try {
-    return { ...LOOK_DEFAULTS, ...JSON.parse(localStorage.getItem(LOOK_KEY) || '{}') };
-  } catch {
-    return { ...LOOK_DEFAULTS };
-  }
-}
+// The look is one preference for every pane and the file viewer: see look.ts.
 
 const PENDING_KEY = 'mc-chat.pending';
 
@@ -1418,9 +1403,7 @@ export default {
 
     setLook(key, value) {
       this.look = { ...this.look, [key]: value };
-      try {
-        localStorage.setItem(LOOK_KEY, JSON.stringify(this.look));
-      } catch { /* a browser without storage keeps it for this visit */ }
+      writeLook(this.look);
     },
 
     /** Send a message the pane never recorded, again. */
@@ -2357,6 +2340,20 @@ export default {
           class="mc-chat__effort"
           :class="{ 'mc-chat__effort--on': look.size === v }"
           @click="setLook('size', v)"
+        >
+          {{ v }}
+        </button>
+      </div>
+      <div class="mc-chat__look">
+        <span class="mc-chat__look-label">Files</span>
+        <button
+          v-for="v in ['rendered', 'raw']"
+          :key="v"
+          type="button"
+          class="mc-chat__effort"
+          :class="{ 'mc-chat__effort--on': look.files === v }"
+          :title="v === 'rendered' ? 'Markdown rendered, code and diffs highlighted' : 'The bytes as they are'"
+          @click="setLook('files', v)"
         >
           {{ v }}
         </button>
@@ -3844,3 +3841,35 @@ export default {
   100% { background-position: -200% 0; }
 }
 </style>
+
+<style lang="scss">
+// highlight.js, in the dashboard's colours: one theme for the chat's code blocks and the file
+// viewer's, following light and dark through the tokens. Unscoped because the code arrives
+// through v-html.
+.mc-chat, .pfv {
+  .hljs { color: var(--body-text); }
+  .hljs-comment, .hljs-quote { color: var(--muted); font-style: italic; }
+  .hljs-keyword, .hljs-selector-tag, .hljs-meta, .hljs-doctag, .hljs-section { color: #c678dd; }
+  .hljs-string, .hljs-attr, .hljs-template-variable, .hljs-regexp { color: #98c379; }
+  .hljs-number, .hljs-literal, .hljs-symbol, .hljs-bullet, .hljs-link { color: #d19a66; }
+  .hljs-title, .hljs-name, .hljs-selector-id, .hljs-selector-class, .hljs-type, .hljs-built_in { color: #61afef; }
+  .hljs-variable, .hljs-attribute, .hljs-property, .hljs-params { color: #e06c75; }
+  .hljs-addition { color: #98c379; background: rgba(152, 195, 121, .12); display: inline-block; width: 100%; }
+  .hljs-deletion { color: #e06c75; background: rgba(224, 108, 117, .12); display: inline-block; width: 100%; }
+  .hljs-emphasis { font-style: italic; }
+  .hljs-strong { font-weight: 700; }
+}
+
+body.theme-light {
+  .mc-chat, .pfv {
+    .hljs-keyword, .hljs-selector-tag, .hljs-meta, .hljs-doctag, .hljs-section { color: #a626a4; }
+    .hljs-string, .hljs-attr, .hljs-template-variable, .hljs-regexp { color: #50a14f; }
+    .hljs-number, .hljs-literal, .hljs-symbol, .hljs-bullet, .hljs-link { color: #986801; }
+    .hljs-title, .hljs-name, .hljs-selector-id, .hljs-selector-class, .hljs-type, .hljs-built_in { color: #4078f2; }
+    .hljs-variable, .hljs-attribute, .hljs-property, .hljs-params { color: #e45649; }
+    .hljs-addition { color: #50a14f; }
+    .hljs-deletion { color: #e45649; }
+  }
+}
+</style>
+
