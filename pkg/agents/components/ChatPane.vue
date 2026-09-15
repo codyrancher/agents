@@ -480,20 +480,6 @@ export default {
     },
 
     /**
-     * The command being typed, if one is.
-     *
-     * Only when the slash opens the message, and only up to the first space: `/my-pr-review 42`
-     * is a command with an argument, and the argument is not part of the name. Everything else
-     * a message can contain - a path, a URL, a line of code - has a slash in it that is not in
-     * the first column, which is what keeps this out of the way of ordinary typing.
-     */
-    slashTyped() {
-      const match = /^\/([a-zA-Z0-9_:-]*)(\s?)/.exec(this.draft);
-
-      return match ? { name: `/${ match[1] }`, complete: !!match[2] } : null;
-    },
-
-    /**
      * The command being typed at the cursor, wherever the cursor is.
      *
      * The menu used to open only for a slash in the first column, which is where claude's own
@@ -502,8 +488,9 @@ export default {
      * the menu will not help you anywhere but the front is the wrong way round. So the menu
      * follows the cursor: a slash that starts a word, with the word still being typed.
      *
-     * What gets *sent* is unchanged - claude reads a command from the front of a message, and
-     * `slashTyped` below is still about that.
+     * What gets *sent* is unchanged: claude reads a command from the front of a message, and
+     * a name completed in the middle of a sentence is a name in a sentence, which is how they
+     * are usually written down anyway ("when CI is green, run /my-pr-create").
      */
     slashSpot() {
       const at = Math.min(this.caret ?? this.draft.length, this.draft.length);
@@ -551,40 +538,6 @@ export default {
       return !!this.slashSpot && !this.slashDismissed && this.slashMatches.length > 0;
     },
 
-    /**
-     * What the composer says about the command that has been typed.
-     *
-     * Three states and not two. `unknown` is deliberately not called invalid: the built-in half
-     * of the list is written down rather than read, so a command claude has and this does not
-     * know about lands here, and the message still sends.
-     */
-    slashState() {
-      if (!this.slashTyped || this.slashTyped.name === '/') {
-        return '';
-      }
-
-      const found = this.commands.find((c) => c.name.toLowerCase() === this.slashTyped.name.toLowerCase());
-
-      if (found) {
-        return 'known';
-      }
-
-      return this.slashTyped.complete || !this.slashMatches.length ? 'unknown' : 'partial';
-    },
-
-    slashHint() {
-      if (this.slashState === 'known') {
-        const found = this.commands.find((c) => c.name.toLowerCase() === this.slashTyped.name.toLowerCase());
-
-        return `${ found.name } — ${ found.help }`;
-      }
-
-      if (this.slashState === 'unknown') {
-        return `${ this.slashTyped.name } is not a command this knows about. It will be sent as typed.`;
-      }
-
-      return '';
-    },
 
     canSend() {
       return !!this.draft.trim() && !this.sending;
@@ -2573,14 +2526,14 @@ export default {
       v-if="slashOpen"
       class="mc-chat__slash"
     >
-      <li v-if="customize.length && !slashTyped.name.slice(1)">
+      <li v-if="customize.length && slashSpot && !slashSpot.name.slice(1)">
         <p class="mc-chat__menu-head">
           Customize
         </p>
       </li>
       <li
         v-for="c in customize"
-        v-show="!slashTyped.name.slice(1)"
+        v-show="slashSpot && !slashSpot.name.slice(1)"
         :key="`customize-${ c.command }`"
       >
         <button
@@ -2668,14 +2621,6 @@ export default {
         class="mc-chat__details-path"
       >{{ details.path }}</p>
     </div>
-    <div
-      v-if="slashHint"
-      class="mc-chat__slash-hint"
-      :class="`mc-chat__slash-hint--${ slashState }`"
-    >
-      {{ slashHint }}
-    </div>
-
     <!--
       The prompt box: one bordered box with the text area and the controls inside it, which is
       where Claude Code's VS Code extension puts them - "click the model name at the bottom of
@@ -3649,15 +3594,6 @@ export default {
     white-space: pre-wrap;
   }
 
-  &__slash-hint {
-    flex:      0 0 auto;
-    padding:   4px 18px 0;
-    font-size: 11px;
-    color:     var(--muted);
-
-    &--known { color: var(--success); }
-    &--unknown { color: var(--warning); }
-  }
 
   // Whichever menu is open, the box below it loses its top corners so the two read as one.
   &__slash + &__box,
