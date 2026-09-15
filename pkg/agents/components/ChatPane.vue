@@ -3351,8 +3351,15 @@ export default {
     z-index:       1;
   }
 
-  /* One command name, where it sits in the message. Clickable; the rest of the layer is not. */
-  &__cmd {
+  /*
+   * One command name, where it sits in the message. Clickable; the rest of the layer is not.
+   *
+   * `:deep`, because the marks are written into the layer as HTML and a scoped stylesheet
+   * stamps its attribute on elements the template creates - not on these. Without it the rule
+   * matched nothing: no tint, and `pointer-events: auto` never reached the mark, so a click
+   * went through to the textarea underneath and nothing opened.
+   */
+  :deep(.mc-chat__cmd) {
     padding:        1px 0;
     border-radius:  3px;
     background:     color-mix(in srgb, var(--success) 22%, transparent);
