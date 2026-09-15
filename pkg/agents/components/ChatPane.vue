@@ -315,6 +315,11 @@ export default {
       custom:      [],
       slashIndex:  0,
       slashDismissed: false,
+      /** Where the cursor is in the box, so the command menu can follow it. */
+      caret:       0,
+      /** The skill a marked name was clicked on, and what has been read about each. */
+      details:      null,
+      detailsCache: {},
       /**
        * What claude here can be set to, read from claude rather than listed in this file.
        *
@@ -488,11 +493,53 @@ export default {
       return match ? { name: `/${ match[1] }`, complete: !!match[2] } : null;
     },
 
+    /**
+     * The command being typed at the cursor, wherever the cursor is.
+     *
+     * The menu used to open only for a slash in the first column, which is where claude's own
+     * commands have to be - but half of what people type a skill's name into is a sentence
+     * ("when CI is green run /my-pr-create"), and having to remember the name exactly because
+     * the menu will not help you anywhere but the front is the wrong way round. So the menu
+     * follows the cursor: a slash that starts a word, with the word still being typed.
+     *
+     * What gets *sent* is unchanged - claude reads a command from the front of a message, and
+     * `slashTyped` below is still about that.
+     */
+    slashSpot() {
+      const at = Math.min(this.caret ?? this.draft.length, this.draft.length);
+      const before = this.draft.slice(0, at);
+      const match = /(^|[\s([{"'`])\/([a-zA-Z0-9_:-]*)$/.exec(before);
+
+      if (!match) {
+        return null;
+      }
+      const name = `/${ match[2] }`;
+
+      return { name, start: at - name.length, end: at };
+    },
+
+    /**
+     * The draft with its command names marked, for the layer over the box.
+     *
+     * Only names this pod actually has are marked: a path with a slash in it, or a name claude
+     * has never heard of, is left as plain text rather than promised something it cannot do.
+     */
+    draftMarked() {
+      const known = new Map(this.commands.map((c) => [c.name.toLowerCase(), c]));
+      const escape = (text) => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+      return `${ escape(this.draft).replace(/(^|[\s([{"'`])(\/[a-zA-Z0-9_:-]+)/g, (all, lead, name) => {
+        const found = known.get(name.toLowerCase());
+
+        return found ? `${ lead }<mark class="mc-chat__cmd" data-name="${ name }">${ name }</mark>` : all;
+      }) }\n`;
+    },
+
     slashMatches() {
-      if (!this.slashTyped) {
+      if (!this.slashSpot) {
         return [];
       }
-      const typed = this.slashTyped.name.toLowerCase();
+      const typed = this.slashSpot.name.toLowerCase();
 
       return this.commands
         .filter((c) => c.name.toLowerCase().startsWith(typed))
@@ -501,7 +548,7 @@ export default {
 
     /** The menu is open while a name is still being typed and there is something to offer. */
     slashOpen() {
-      return !!this.slashTyped && !this.slashTyped.complete && !this.slashDismissed && this.slashMatches.length > 0;
+      return !!this.slashSpot && !this.slashDismissed && this.slashMatches.length > 0;
     },
 
     /**
@@ -1208,20 +1255,79 @@ export default {
           continue;
         }
         seen.add(name);
-        found.push({ name, help: cmd ? 'this pod\u2019s own command' : 'skill', source: cmd ? 'command' : 'skill' });
+        found.push({
+          name, help: cmd ? 'this pod\u2019s own command' : 'skill', source: cmd ? 'command' : 'skill', path: (cmd ? cmd[1] : line.replace(/^SKILL /, '')).trim(),
+        });
       }
 
       this.custom = found.sort((a, b) => a.name.localeCompare(b.name));
     },
 
-    /** Put a command in the box, ready for its argument. */
-    pickCommand(command) {
-      const rest = this.draft.slice(this.slashTyped ? this.slashTyped.name.length : 0);
+    /** A click on a marked name: what does that skill do? */
+    async onGhostClick(event) {
+      const name = event?.target?.dataset?.name;
 
-      this.draft = `${ command.name }${ rest.startsWith(' ') ? rest : ` ${ rest }` }`.trimEnd();
-      this.draft = `${ this.draft } `.replace(/\s+$/, ' ');
+      if (!name) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      const command = this.commands.find((c) => c.name.toLowerCase() === name.toLowerCase());
+
+      if (!command) {
+        return;
+      }
+      this.details = { ...command, about: this.detailsCache[command.name] ?? '' };
+      if (this.detailsCache[command.name] !== undefined || !command.path) {
+        return;
+      }
+      // The first lines of the file: a skill's frontmatter says what it is for, and a command's
+      // first paragraph is the same thing by another name.
+      const about = await this.run(`sed -n '1,40p' ${ JSON.stringify(command.path) } 2>/dev/null`, 10000).catch(() => '');
+      const description = /^description:\s*(.+)$/m.exec(String(about))?.[1]
+        || String(about).split('\n').map((l) => l.trim()).find((l) => l && !/^(---|#|name:|allowed-tools:)/.test(l))
+        || 'No description in the file.';
+
+      this.detailsCache = { ...this.detailsCache, [command.name]: description.trim() };
+      if (this.details?.name === command.name) {
+        this.details = { ...this.details, about: description.trim() };
+      }
+    },
+
+    /** The layer follows the box when the box scrolls. */
+    syncGhost() {
+      const ghost = this.$refs.ghost;
+      const box = this.$refs.box;
+
+      if (ghost && box) {
+        ghost.scrollTop = box.scrollTop;
+      }
+    },
+
+    /** Where the cursor is, after anything that could have moved it. */
+    syncCaret(event) {
+      const box = event?.target || this.$refs.box;
+
+      this.caret = box?.selectionStart ?? this.draft.length;
+      this.$nextTick(() => this.syncGhost());
+    },
+
+    /** Put a command in the box in place of the name being typed, ready for its argument. */
+    pickCommand(command) {
+      const spot = this.slashSpot || { start: 0, end: this.draft.length };
+      const after = this.draft.slice(spot.end);
+      const head = `${ this.draft.slice(0, spot.start) }${ command.name }`;
+      const gap = after.startsWith(' ') || after.startsWith('\n') ? '' : ' ';
+
+      this.draft = `${ head }${ gap }${ after }`;
       this.slashIndex = 0;
-      this.$nextTick(() => this.$refs.box?.focus());
+      this.caret = head.length + gap.length;
+      this.$nextTick(() => {
+        const box = this.$refs.box;
+
+        box?.focus();
+        box?.setSelectionRange?.(this.caret, this.caret);
+      });
     },
 
     moveSlash(direction) {
@@ -2541,6 +2647,27 @@ export default {
       <pre class="mc-chat__takeover-tail">{{ paneTail }}</pre>
     </div>
 
+    <!-- What a name in the message is, when one is clicked. -->
+    <div
+      v-if="details"
+      class="mc-chat__details"
+    >
+      <div class="mc-chat__details-head">
+        <code>{{ details.name }}</code>
+        <span class="mc-chat__details-kind">{{ details.source === 'skill' ? 'skill' : 'command' }}</span>
+        <button
+          type="button"
+          class="mc-chat__details-close"
+          title="Close"
+          @click="details = null"
+        >×</button>
+      </div>
+      <p class="mc-chat__details-about">{{ details.about || 'Reading what it does…' }}</p>
+      <p
+        v-if="details.path"
+        class="mc-chat__details-path"
+      >{{ details.path }}</p>
+    </div>
     <div
       v-if="slashHint"
       class="mc-chat__slash-hint"
@@ -2558,8 +2685,22 @@ export default {
     -->
     <div
       class="mc-chat__box"
-      :class="[slashState ? `mc-chat__box--${ slashState }` : '', { 'mc-chat__box--focus': focused }]"
+      :class="{ 'mc-chat__box--focus': focused }"
     >
+      <!--
+        The names in the message, marked where they are.
+        
+        A textarea cannot colour part of its own text, so the marks are drawn on a layer over
+        it: same text, same wrapping, invisible except for the command names, and transparent
+        to the pointer everywhere but on one of them - where a click asks what the skill does.
+      -->
+      <div
+        ref="ghost"
+        class="mc-chat__ghost"
+        aria-hidden="true"
+        @click="onGhostClick"
+        v-html="draftMarked"
+      />
       <textarea
         ref="box"
         v-model="draft"
@@ -2568,7 +2709,12 @@ export default {
         :placeholder="working ? 'Queue the next message…' : 'Message Claude — / for commands'"
         :title="'Enter to send, Shift+Enter for a new line, / for commands, paste an image to attach it'"
         @keydown="onKeydown"
+        @keyup="syncCaret"
+        @click="syncCaret"
+        @select="syncCaret"
+        @input="syncCaret"
         @paste="onPaste"
+        @scroll="syncGhost"
         @focus="focused = true"
         @blur="focused = false"
       />
@@ -3212,6 +3358,7 @@ export default {
     flex:          0 0 auto;
     display:       flex;
     flex-direction: column;
+    position:      relative;
     margin:        0 var(--mc-chat-gutter) 12px;
     border:        1px solid var(--border);
     border-radius: 8px;
@@ -3219,23 +3366,105 @@ export default {
     transition:    border-color 0.12s ease;
 
     &--focus { border-color: var(--link); }
-    &--known { border-color: var(--success); }
-    &--unknown { border-color: var(--warning); }
+  }
+
+  /*
+   * The box and the layer over it have to agree about every pixel of type, or the marks drift
+   * off the words they belong to: same font, same size, same line height, same padding, same
+   * wrapping. Only the marks paint; everything else on the layer is invisible.
+   */
+  &__textarea,
+  &__ghost {
+    padding:     9px 11px 4px;
+    font-size:   13px;
+    font-family: inherit;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    overflow-wrap: break-word;
   }
 
   &__textarea {
     flex:       1 1 auto;
     resize:     vertical;
     min-height: 52px;
-    padding:    9px 11px 4px;
     border:     0;
     background: transparent;
     color:      var(--body-text);
-    font-size:  13px;
-    font-family: inherit;
+    position:   relative;
+    z-index:    0;
 
     &:focus { outline: none; }
     &::placeholder { color: var(--muted); }
+  }
+
+  &__ghost {
+    position:      absolute;
+    inset:         0;
+    overflow:      hidden;
+    color:         transparent;
+    pointer-events: none;
+    z-index:       1;
+  }
+
+  /* One command name, where it sits in the message. Clickable; the rest of the layer is not. */
+  &__cmd {
+    padding:        1px 0;
+    border-radius:  3px;
+    background:     color-mix(in srgb, var(--success) 22%, transparent);
+    box-shadow:     0 1px 0 color-mix(in srgb, var(--success) 55%, transparent);
+    color:          transparent;
+    cursor:         pointer;
+    pointer-events: auto;
+
+    &:hover { background: color-mix(in srgb, var(--success) 38%, transparent); }
+  }
+
+  /* What a clicked name is: its kind, what it does, and where it lives. */
+  &__details {
+    margin:        0 var(--mc-chat-gutter) 6px;
+    padding:       8px 10px;
+    border:        1px solid var(--border);
+    border-radius: 8px;
+    background:    var(--box-bg);
+  }
+
+  &__details-head {
+    display:     flex;
+    align-items: center;
+    gap:         8px;
+  }
+
+  &__details-kind {
+    color:          var(--muted);
+    font-size:      11px;
+    text-transform: uppercase;
+    letter-spacing: .05em;
+  }
+
+  &__details-close {
+    margin-left: auto;
+    min-height:  0;
+    padding:     0 4px;
+    border:      0;
+    background:  transparent;
+    color:       var(--muted);
+    font-size:   16px;
+    line-height: 1;
+    cursor:      pointer;
+
+    &:hover { color: var(--body-text); }
+  }
+
+  &__details-about {
+    margin:    6px 0 0;
+    font-size: 12px;
+  }
+
+  &__details-path {
+    margin:    4px 0 0;
+    color:     var(--muted);
+    font-size: 11px;
+    word-break: break-all;
   }
 
   // The row along the bottom of the box: model, permissions, then the command menu and send.
