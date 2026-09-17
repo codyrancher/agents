@@ -1119,7 +1119,11 @@ export default {
     // reserved so they can appear on hover without moving the label.
     padding: 0 48px 0 10px;
     border: none;
-    border-radius: 4px;
+    // Flat tabs with a straight underline on the active one - the Dev extension's conversation
+    // tabs (the shell Tabbed look), not a rounded box. Every tab reserves the 2px underline in
+    // transparent so the row does not shift when a tab becomes active.
+    border-radius: 0;
+    border-bottom: 2px solid transparent;
     background: none;
     color: var(--muted);
     cursor: pointer;
@@ -1127,15 +1131,14 @@ export default {
     white-space: nowrap;
 
     &:hover {
-      background: var(--default-hover-bg, var(--body-bg));
       color: var(--body-text);
     }
 
-    // The open conversation: the one the terminal below is showing.
+    // The open conversation: the one the terminal below is showing. A straight underline and the
+    // label in the accent colour - no box, no fill.
     &--active {
-      background: var(--body-bg);
-      color: var(--body-text);
-      box-shadow: inset 0 -2px 0 var(--primary, var(--link, currentColor));
+      color: var(--active, var(--primary));
+      border-bottom-color: var(--active, var(--primary));
     }
 
     // While renaming there is an input, not a label and controls, so the reserved trailing
