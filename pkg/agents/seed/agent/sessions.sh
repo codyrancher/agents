@@ -54,7 +54,7 @@ ID=$2
 PROJECT=''
 
 case "$VERB" in
-  list|new) PROJECT=$2; ID='' ;;
+  list|new|states) PROJECT=$2; ID='' ;;
 esac
 
 case "$PROJECT" in
@@ -156,6 +156,65 @@ case "$VERB" in
     done
     ;;
 
+  states)
+    # What each conversation's pane is doing, for the status dot on its tab.
+    #
+    # Computed in the pod because the two facts that decide it are reachable from nowhere else.
+    # A pane is a tmux session, and a tmux server is per user and answers only to a process
+    # inside this pod - so whether a conversation is still running is a question only here can
+    # ask. And a turn spent inside subagents fires no hook (the hook only marks a turn's edges),
+    # so the sole sign that such a turn is still going is the transcript file moving - a stat the
+    # browser cannot do either. The hook's state file names the last event; the transcript's
+    # mtime says whether anything has happened since. The browser crosses the two the way the
+    # chat does.
+    #
+    # Keyed on the state files, not the directories `list` walks: a conversation nobody has ever
+    # opened has no state file and so no line here, which is what leaves a fresh tab with no dot
+    # rather than a misleading one.
+    #
+    # One line per conversation, tab separated: id, alive (yes/no), seconds since the transcript
+    # (or a subagent's) last moved (-1 when there is none), and the head of the state file for
+    # the last event.
+    now=$(date +%s)
+
+    for state in "$SESSIONS/$PREFIX"*.state.json; do
+      [ -f "$state" ] || continue
+
+      id=$(basename "$state" .state.json)
+
+      # Same guard as `list`: the prefix is a glob, so what follows it must be nothing but the
+      # ordinal, or project `foo` swallows project `foo-bar`.
+      case "${id#"$PREFIX"}" in
+        ''|*[!0-9]*) continue ;;
+      esac
+
+      alive=no
+      tmux has-session -t "mc-$id" 2>/dev/null && alive=yes
+
+      # The transcript this pane is on, named in the state file, and the newest of it and its
+      # subagents' side transcripts - a long turn shows only in the subagents' files.
+      transcript=$(sed -n 's/.*"transcript":"\([^"]*\)".*/\1/p' "$state" | head -1)
+      mtime=0
+
+      if [ -n "$transcript" ] && [ -f "$transcript" ]; then
+        mtime=$(stat -c %Y "$transcript" 2>/dev/null || echo 0)
+
+        for sub in "${transcript%.jsonl}"/subagents/*.jsonl; do
+          [ -f "$sub" ] || continue
+
+          sm=$(stat -c %Y "$sub" 2>/dev/null || echo 0)
+          [ "$sm" -gt "$mtime" ] && mtime=$sm
+        done
+      fi
+
+      if [ "$mtime" -gt 0 ]; then wrote=$((now - mtime)); else wrote=-1; fi
+
+      # Tabs and newlines out of the state head, because this listing is tab separated and one
+      # line per conversation.
+      printf '%s\t%s\t%s\t%s\n' "$id" "$alive" "$wrote" "$(head -c 800 "$state" | tr -d '\n\t')"
+    done
+    ;;
+
   new)
     # Allocated here, with mkdir, and that is the whole point of this verb. Counting the tabs in
     # the browser picks a name that another browser tab may be picking at the same moment, and
@@ -225,7 +284,7 @@ case "$VERB" in
     ;;
 
   *)
-    echo "unknown verb: $VERB (list [project], new [project], end ID, rename ID TITLE)" >&2
+    echo "unknown verb: $VERB (list [project], states [project], new [project], end ID, rename ID TITLE)" >&2
     exit 2
     ;;
 esac

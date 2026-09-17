@@ -337,12 +337,121 @@ export function agentShellUrl(pod: string, session: string, mode = 'claude'): st
   );
 }
 
+/**
+ * What a conversation's pane is doing, as one word for the tab's status dot.
+ *
+ * `working` while claude is mid-turn, `input` while it is waiting on the person, `idle` when it
+ * is up but between turns, `finished` when the pane is gone, and `none` when the conversation has
+ * never run - which is what leaves a fresh tab without a dot.
+ */
+export type AgentActivity = 'working' | 'input' | 'idle' | 'finished' | 'none';
+
 /** One conversation: the name that addresses it, and the name a person reads. */
 export interface AgentSession {
   /** Names the directory, the tmux session and the exec URL. Never changes. */
   id: string;
   /** What the tab says. Renamable, and kept in the pod beside the conversation. */
   title: string;
+  /** What its pane is doing, for the tab's status dot. `none` until it has run at all. */
+  state?: AgentActivity;
+}
+
+/** The raw signals `sessions.sh states` reports for one conversation, before they become a word. */
+interface SessionActivity {
+  /** Whether the conversation's tmux session exists in the pod. */
+  alive: boolean;
+  /** The last hook event the pane recorded (chat-hook.mjs), and its notification and time. */
+  event: string;
+  notification: string;
+  at: string;
+  /** Seconds since the transcript (or a subagent's) last moved, or -1 when there is none. */
+  wroteAgo: number;
+}
+
+/**
+ * How recently the transcript must have moved for the conversation to count as working. Long
+ * enough to cover a subagent thinking between writes, short enough that a conversation nobody is
+ * in stops claiming to be busy. Kept in step with the Dev extension's WORKING_WINDOW_S, which is
+ * the same threshold applied to the same signals for the same reason.
+ */
+const WORKING_WINDOW_S = 90;
+
+/**
+ * The bucket a conversation falls in, from what the pod reported about it.
+ *
+ * A copy of the Dev extension's `agentStateOf` rather than a call to it: the two extensions do
+ * not import across each other, and this is the one derivation both need to make the same way.
+ * The transcript, when it has moved since the hook last spoke, outranks the hook: a hook fires
+ * only at a turn's edges, so a turn spent inside subagents reads as finished to it while the
+ * subagents write all the while, and a permission prompt answered in the terminal leaves the
+ * last Notification standing over an agent that is working again.
+ */
+function activityState(a: SessionActivity): AgentActivity {
+  if (!a.alive) {
+    return 'finished';
+  }
+
+  const hookAgo = (Date.now() - (Date.parse(a.at) || 0)) / 1000;
+
+  if (a.wroteAgo >= 0 && a.wroteAgo <= WORKING_WINDOW_S && a.wroteAgo + 5 < hookAgo) {
+    return 'working';
+  }
+  if (a.event === 'Notification' && a.notification && a.notification !== 'idle_prompt') {
+    return 'input';
+  }
+  switch (a.event) {
+  case 'UserPromptSubmit':
+  case 'PreToolUse':
+  case 'PostToolUse':
+  case 'SubagentStop':
+    return 'working';
+  case 'Notification':
+    return a.notification === 'idle_prompt' ? 'idle' : 'input';
+  default:
+    return 'idle';
+  }
+}
+
+/**
+ * What each conversation's pane is doing, keyed by id. Asked of the pod's `states` verb, which
+ * reports the raw signals; the bucket is worked out here. A conversation that has never run has
+ * no line and so no entry, which the caller reads as `none`.
+ */
+async function sessionStates(project = ''): Promise<Map<string, AgentActivity>> {
+  const args = project ? ['states', project] : ['states'];
+  const listing = await sessionScript(args, 'read what the conversations are doing').catch(() => '');
+  const out = new Map<string, AgentActivity>();
+
+  for (const raw of listing.split('\n')) {
+    const line = raw.replace(/\r$/, '');
+
+    if (!line) {
+      continue;
+    }
+
+    const [id, alive, wrote, json] = line.split('\t');
+
+    if (!id) {
+      continue;
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let event: any = {};
+
+    try {
+      event = JSON.parse(json || '{}');
+    } catch { /* a state file caught mid-write; the next poll reads it whole */ }
+
+    out.set(id, activityState({
+      alive:        alive === 'yes',
+      event:        String(event.event || ''),
+      notification: String(event.notification || ''),
+      at:           String(event.at || ''),
+      wroteAgo:     Number(wrote ?? -1),
+    }));
+  }
+
+  return out;
 }
 
 /** One call to the pod's own account of its conversations. See pod/agent/sessions.sh. */
@@ -377,7 +486,13 @@ async function sessionScript(args: string[], what: string): Promise<string> {
  * is no pod, and the panel would otherwise show an error over a pod that is merely booting.
  */
 export async function agentSessions(): Promise<AgentSession[]> {
-  const listing = await sessionScript(['list'], 'read the conversations in the agent pod').catch(() => '');
+  // The list and the states in one round trip together: the list is which tabs exist (every
+  // conversation, opened here or not), the states are what each is doing (only those that have
+  // run). Merged by id, with `none` for a conversation the states did not mention.
+  const [listing, states] = await Promise.all([
+    sessionScript(['list'], 'read the conversations in the agent pod').catch(() => ''),
+    sessionStates(),
+  ]);
 
   return listing.split('\n')
     .map((line) => line.replace(/\r$/, ''))
@@ -386,7 +501,7 @@ export async function agentSessions(): Promise<AgentSession[]> {
       const tab = line.indexOf('\t');
       const id = tab === -1 ? line : line.slice(0, tab);
 
-      return { id, title: tab === -1 ? id : line.slice(tab + 1) };
+      return { id, title: tab === -1 ? id : line.slice(tab + 1), state: states.get(id) || 'none' as AgentActivity };
     })
     .filter((session) => /^agent-\d+$/.test(session.id))
     .sort((a, b) => Number(a.id.slice(6)) - Number(b.id.slice(6)));
