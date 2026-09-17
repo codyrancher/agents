@@ -56,6 +56,16 @@ const MIDDLE_BUTTON = 1;
 const RESERVATION_ID = 'mc-agent-reservation';
 
 /**
+ * How often the tabs re-read what their conversations are doing, for the status dots.
+ *
+ * The state lives in the pod - a tmux session and a transcript's mtime, neither reachable from
+ * the browser - so it is re-asked rather than pushed. Slow enough not to hammer the exec
+ * subresource with a panel sitting open, quick enough that a dot flipping to "working" or
+ * "waiting" is seen while it still matters. In step with the Dev extension's sidebar tick.
+ */
+const STATES_POLL_MS = 12_000;
+
+/**
  * The stylesheet holding the reservation, made on first use.
  *
  * One element for the life of the page rather than a rule rewritten into an existing sheet:
@@ -104,9 +114,11 @@ export default {
 
     return {
       open:     false,
-      /** [{ id, title }], as the pod reports them. */
+      /** [{ id, title, state }], as the pod reports them. `state` drives the tab's status dot. */
       sessions: [],
       active:   '',
+      /** The interval re-reading the conversations' states while the panel is open, or null. */
+      statesTimer: null,
       // Whether the tab remembered from the last visit has been restored yet. Until it has, it
       // outranks whatever this page load happened to select.
       restoredTab: false,
@@ -238,6 +250,7 @@ export default {
     // to be given back or the dashboard keeps a strip of empty space for ever.
     document.getElementById(RESERVATION_ID)?.remove();
 
+    this.stopPolling();
     this.endGrab();
     window.removeEventListener('resize', this.clamp);
 
@@ -267,6 +280,9 @@ export default {
 
       if (open) {
         this.refresh();
+        this.startPolling();
+      } else {
+        this.stopPolling();
       }
     },
 
@@ -439,6 +455,61 @@ export default {
       this.select(wanted || this.sessions[0].id);
     },
 
+    /**
+     * Keep the status dots live while the panel is open.
+     *
+     * Only the dots, not the tab set: adding and removing tabs is what refresh, startNew and
+     * closeSession do, and doing it from a background tick would tear a terminal down under
+     * somebody mid-conversation. So this re-reads the states and writes them onto the tabs that
+     * are already there, leaving `active`, `seen` and the mounted terminals untouched.
+     */
+    startPolling() {
+      this.stopPolling();
+      this.statesTimer = setInterval(() => this.pollStates(), STATES_POLL_MS);
+    },
+
+    stopPolling() {
+      if (this.statesTimer) {
+        clearInterval(this.statesTimer);
+        this.statesTimer = null;
+      }
+    },
+
+    async pollStates() {
+      // A refresh is already reading the same thing; let it, rather than racing it.
+      if (!this.open || this.loading) {
+        return;
+      }
+
+      let fresh;
+
+      try {
+        fresh = await agentSessions();
+      } catch {
+        return; // The next tick asks again; a missed poll is a dot a few seconds stale.
+      }
+
+      const states = new Map(fresh.map((session) => [session.id, session]));
+
+      this.sessions = this.sessions.map((session) => {
+        const now = states.get(session.id);
+
+        // A conversation the pod no longer reports has ended elsewhere; its dot goes quiet until
+        // the next full refresh drops the tab.
+        return now ? { ...session, title: now.title, state: now.state } : { ...session, state: 'none' };
+      });
+    },
+
+    /** The status dot's tooltip: what its colour means, in words, for a hover. */
+    statusLabel(state) {
+      return {
+        working:  'Agent working',
+        input:    'Agent waiting for input',
+        idle:     'Agent idle',
+        finished: 'Agent finished',
+      }[state] || '';
+    },
+
     /** Show one conversation, mounting its terminal the first time. */
     select(id) {
       if (!id) {
@@ -461,7 +532,7 @@ export default {
       try {
         const id = await startAgentSession();
 
-        this.sessions = [...this.sessions, { id, title: id.replace(/^agent-/, '') }];
+        this.sessions = [...this.sessions, { id, title: id.replace(/^agent-/, ''), state: 'none' }];
         this.select(id);
       } catch (e) {
         this.error = e?.message || String(e);
@@ -640,6 +711,19 @@ export default {
             @blur="commitRename"
           >
           <template v-else>
+            <!--
+              The agent-status dot: what this conversation's pane is doing, read from the pod (see
+              agent.ts `states`). Present only when there is something to say - a conversation that
+              has never run carries no dot rather than a misleading one. It sits before the title
+              and is not one of the hover controls, so it never moves the label as the pointer
+              crosses the tab; its `title` gives the state in words for a hover.
+            -->
+            <span
+              v-if="session.state && session.state !== 'none'"
+              class="mc-agent__dot"
+              :class="`mc-agent__dot--${ session.state }`"
+              :title="statusLabel(session.state)"
+            />
             <span class="mc-agent__tab-title">{{ session.title }}</span>
             <button
               type="button"
@@ -1066,6 +1150,46 @@ export default {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  // The agent-status dot, before the title. A small filled circle in the Studio's status
+  // colours: it is out of the row's hover controls, so it never shifts the label, and it is
+  // shown only for a conversation that has a state to report. The colours are the same three the
+  // Dev extension's sidebar uses for the same words, taken from the Studio's own tokens rather
+  // than that extension's variables: accent for working, amber for waiting, green for finished,
+  // grey for idle. Rancher's own --primary/--warning/--success lead so the dot tracks the theme,
+  // with the Studio token as the fallback.
+  &__dot {
+    flex: 0 0 auto;
+    width: 7px;
+    height: 7px;
+    margin-right: 6px;
+    border-radius: 50%;
+    background: var(--muted, var(--studio-neutral, #8B8B96));
+
+    &--working {
+      background: var(--primary, var(--studio-info, #3D98D3));
+      // A gentle pulse says the work is live rather than a colour that happens to be blue. It is
+      // opacity only - the dot keeps its size, so the title beside it never moves.
+      animation: mc-agent-dot-pulse 1.4s ease-in-out infinite;
+    }
+
+    &--input {
+      background: var(--warning, var(--studio-warning, #C9A227));
+    }
+
+    &--finished {
+      background: var(--success, var(--studio-success, #3E8C4F));
+    }
+
+    &--idle {
+      background: var(--muted, var(--studio-neutral, #8B8B96));
+    }
+  }
+
+  @keyframes mc-agent-dot-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.35; }
   }
 
   // New conversation, at the end of the tab row where a new tab would appear. The same bare-icon
