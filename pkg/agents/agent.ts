@@ -153,6 +153,12 @@ export function agentDeploymentBody(): Record<string, unknown> {
             name:    AGENT_CONTAINER,
             image:   EXT_IMAGE,
             command: ['/bin/sh', '/seed/boot.sh'],
+            // Privileged for FUSE: a workspace on a downstream cluster is mounted here over sshfs
+            // (mount-downstream.sh) so a pane sees its files, and opening /dev/fuse is refused to
+            // a container the device cgroup has not been opened for - which, short of a device
+            // plugin, means privileged. This pod is already cluster-admin, so it is a node-level
+            // rather than a new-authority escalation. Local-only installs never mount anything.
+            securityContext: { privileged: true },
             env:     [
               // Rancher's address from inside the cluster, which is the node's: this cluster is
               // k3s inside the Rancher container. Declared before RANCHER_URL because Kubernetes
@@ -176,6 +182,10 @@ export function agentDeploymentBody(): Record<string, unknown> {
               // Not nested in the workspace mount: these are another product's trees, and a
               // conversation's own directory has nothing to do with them.
               { name: 'workspaces', mountPath: WORKSPACES_MOUNT },
+              // The durable Rancher token mount-downstream.sh execs and mounts downstream
+              // workspaces with. Optional: a Rancher with no downstream workspaces never makes
+              // this Secret, and the pod comes up local-only without it.
+              { name: 'downstream-exec', mountPath: '/var/run/downstream-exec', readOnly: true },
             ],
             // No probes. There is no port and nothing to ask; a pod with neither is Ready as
             // soon as it is Running, which for this one is the truth.
@@ -189,6 +199,7 @@ export function agentDeploymentBody(): Record<string, unknown> {
             // time somebody made one.
             { name: 'extensions', hostPath: { path: EXT_HOST_ROOT, type: 'DirectoryOrCreate' } },
             { name: 'workspaces', hostPath: { path: WORKSPACES_HOST_ROOT, type: 'DirectoryOrCreate' } },
+            { name: 'downstream-exec', secret: { secretName: 'downstream-exec', optional: true } },
           ],
         },
       },
