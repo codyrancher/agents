@@ -59,6 +59,18 @@ HOME_DIR="$AGENT_HOME" /bin/sh /seed/terminal-tools.sh >"$WORKSPACE/.terminal-to
   echo "$(date -u +%FT%TZ) done"
 ) >"$WORKSPACE/.panes.log" 2>&1 &
 
+# A workspace on a downstream cluster has its tree on that cluster's node, not this one's, so it
+# is not at /workspaces/<name> here the way a local one is. Mount each such workspace over sshfs
+# so a pane sees its files like any other. sshfs needs FUSE (this container runs privileged, see
+# the Deployment) and allow_other so the node user's panes can read a mount root made by root
+# here. Backgrounded, with its tools installed first; it waits for the rest. See
+# /seed/mount-downstream.sh.
+(
+  apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq sshfs >/dev/null 2>&1
+  grep -q '^user_allow_other' /etc/fuse.conf 2>/dev/null || echo user_allow_other >> /etc/fuse.conf
+  /bin/sh /seed/mount-downstream.sh
+) >"$WORKSPACE/.mounts.log" 2>&1 &
+
 # The container's only remaining job is to stay up so there is something to exec into. `tail -f`
 # on /dev/null is the smallest thing that does that and says nothing; a `sleep` with a number on
 # it would end, and a pod that ends is a pod Kubernetes restarts for no reason.
