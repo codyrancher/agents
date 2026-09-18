@@ -12,17 +12,40 @@ entries:
       catalog.cattle.io/ui-component: plugins
       catalog.cattle.io/ui-extensions-version: '>= 3.0.0 < 5.0.0'
     apiVersion: v2
-    appVersion: 0.1.54
-    created: "2026-09-17T17:02:06.726241735Z"
+    appVersion: 0.1.55
+    created: "2026-09-18T14:37:06.671449218Z"
     description: The terminal, the agent pod and its conversations, offered to every
       extension in this Rancher
-    digest: d8ac3f5b438dbc3e9f5cc53a6158240663b1c406f284d9070e36871d8b7a3802
+    digest: eb404628a899f5e92112badf6112e75e67bc883cc56bd7b75730e51770ff1e59
     home: https://github.com/codyrancher/agents
     icon: https://codyrancher.github.io/agents/icon.svg
     name: agents
     type: application
     urls:
-    - assets/agents/agents-0.1.54.tgz
+    - assets/agents/agents-0.1.55.tgz
+    version: 0.1.55
+  - annotations:
+      catalog.cattle.io/certified: rancher
+      catalog.cattle.io/display-name: Agents
+      catalog.cattle.io/namespace: cattle-ui-plugin-system
+      catalog.cattle.io/os: linux
+      catalog.cattle.io/permits-os: linux, windows
+      catalog.cattle.io/rancher-version: '>= 2.10.0'
+      catalog.cattle.io/scope: management
+      catalog.cattle.io/ui-component: plugins
+      catalog.cattle.io/ui-extensions-version: '>= 3.0.0 < 5.0.0'
+    apiVersion: v2
+    appVersion: 0.1.54
+    created: "2026-09-17T17:02:32.322090509Z"
+    description: The terminal, the agent pod and its conversations, offered to every
+      extension in this Rancher
+    digest: 34a3c574c76591be97db896f275779ff0b143858986cbc958a5b0ffef3d56adc
+    home: https://github.com/codyrancher/agents
+    icon: https://codyrancher.github.io/agents/icon.svg
+    name: agents
+    type: application
+    urls:
+    - https://github.com/codyrancher/agents/releases/download/agents-0.1.54/agents-0.1.54.tgz
     version: 0.1.54
   - annotations:
       catalog.cattle.io/certified: rancher
@@ -1243,4 +1266,4 @@ entries:
     urls:
     - https://github.com/codyrancher/agents/releases/download/agents-0.1.0/agents-0.1.0.tgz
     version: 0.1.0
-generated: "2026-09-17T17:02:06.725620958Z"
+generated: "2026-09-18T14:37:06.671037769Z"
