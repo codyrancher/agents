@@ -3826,7 +3826,7 @@ export default {
     background:    var(--muted);
     opacity:       0.5;
   }
-  &__agent--working &__agent-dot { background: var(--link); opacity: 1; animation: mc-chat-pulse 1.4s infinite ease-in-out; }
+  &__agent--working &__agent-dot { background: var(--primary); opacity: 1; animation: mc-chat-pulse 1.4s infinite ease-in-out; }
 
   &__agent-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   &__agent-last { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
