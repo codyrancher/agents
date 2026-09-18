@@ -57,10 +57,45 @@ mount_one() {
     && echo "$(date -u +%FT%TZ) mounted $name ($cluster)"
 }
 
+# The seed - bin/dev-shell (cluster-aware, since DEV_CLUSTER is set), the tools, .claude, CLAUDE.md.
+# For a local workspace the workspace pod fetches this itself (workspace-tools ensureSeed); a
+# downstream pod cannot reach the local dev-api, so it is laid out here instead, from the agent pod
+# which can - written into the mount, which is the workspace pod's own disk. Refreshed only when the
+# seed version or the workspace's issue/pr changes, recorded in the same .dev-seed marker ensureSeed
+# reads, so the browser side skips a workspace this has already done.
+SEED_URL=http://dev-api.dev-system.svc:8080/agent-seed
+SEEDJSON=/workspace/.dev-seed.json
+LAYOUT=/workspace/.dev-layout.mjs
+SEEDVER=
+
+fetch_seed() {
+  curl -fsS -m 30 "$SEED_URL" -o "$SEEDJSON" 2>/dev/null || return 1
+  node -e "const s=require(process.argv[1]);require('fs').writeFileSync(process.argv[2],s['layout.mjs'])" "$SEEDJSON" "$LAYOUT" 2>/dev/null || return 1
+  SEEDVER=$(curl -fsS -m 10 "$SEED_URL/version" 2>/dev/null | sed -n 's/.*"version" *: *"\([^"]*\)".*/\1/p')
+  [ -n "$SEEDVER" ] || SEEDVER=unknown
+  return 0
+}
+
+layout_one() {
+  name=$1; cluster=$2; dir=/workspaces/$name
+  [ -f "$LAYOUT" ] || return 0
+  issue=$(printf '%s' "$name" | sed -n 's/^issue-\([0-9][0-9]*\).*/\1/p')
+  pr=$(printf '%s' "$name" | sed -n 's/^pr-\([0-9][0-9]*\).*/\1/p')
+  marker="$SEEDVER:$issue:$pr:$name"
+  [ "$(cat "$dir/.dev-seed" 2>/dev/null)" = "$marker" ] && return 0
+  if DEV_PROJECT="$name" DEV_ISSUE="$issue" DEV_PR="$pr" DEV_CLUSTER="$cluster" \
+     DEV_ROOT="$dir" DEV_WORKDIR="$dir/dashboard" DEV_HOME="$dir/.home" DEV_SEED_FILE="$SEEDJSON" \
+     node "$LAYOUT" >/dev/null 2>&1; then
+    printf '%s' "$marker" > "$dir/.dev-seed"
+    echo "$(date -u +%FT%TZ) laid out seed for $name ($cluster)"
+  fi
+}
+
 while true; do
   TOKEN=$(cat "$SECRET/token" 2>/dev/null)
   RURL=$(cat "$SECRET/rancherUrl" 2>/dev/null)
   if [ -n "$TOKEN" ] && [ -n "$RURL" ]; then
+    fetch_seed
     # The workspaces this Rancher knows, each with the cluster it runs on. Read on this (local)
     # cluster, where every workspace's Installation lives whatever cluster it deploys to.
     kubectl get appinstances.appsplus.io -A -o jsonpath='{range .items[*]}{.metadata.labels.dev\.rancher\.io/workspace}{" "}{.metadata.labels.dev\.rancher\.io/cluster}{"\n"}{end}' 2>/dev/null | \
@@ -70,6 +105,8 @@ while true; do
       # A preview is a built page with no shell, so nothing runs a conversation in it.
       case "$name" in preview-*) continue ;; esac
       mountpoint -q "/workspaces/$name" 2>/dev/null || mount_one "$name" "$cluster"
+      # Once mounted, lay the seed into it (from here - the workspace pod can't fetch it itself).
+      mountpoint -q "/workspaces/$name" 2>/dev/null && layout_one "$name" "$cluster"
     done
   fi
   sleep 20
