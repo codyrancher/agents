@@ -16,12 +16,13 @@
 // ---------------------------------------------------------------------------
 // The conversations are a tab row, not a dropdown.
 //
-// One tab per conversation, click to switch - the whole set visible at a glance, which is what a
-// person wants when they are moving between two or three of them. Each tab carries its own
-// controls rather than one shared set acting on "the active one": a rename pencil and a close,
-// both appearing on hover (and on keyboard focus, so they are reachable without a mouse) in
-// reserved trailing space so a tab does not change width as the pointer crosses it. So closing
-// the third conversation does not mean selecting it first.
+// One tab per conversation, click to switch, drag to rearrange - the whole set visible at a
+// glance and in whatever order suits, which is what a person wants when they are moving between
+// two or three of them. Each tab carries its own controls rather than one shared set acting on
+// "the active one": a rename pencil and a close, both appearing on hover (and on keyboard focus,
+// so they are reachable without a mouse) in reserved trailing space so a tab does not change
+// width as the pointer crosses it. So closing the third conversation does not mean selecting it
+// first.
 //
 // Written out here rather than imported from Rancher's `@shell/components/Tabbed`: that component
 // renders a label as escaped text with no slot, so per-tab controls cannot be added to it, and
@@ -29,6 +30,7 @@
 // `useHash` (a conversation id in the URL would land in Rancher's history), no side-tab mode,
 // no extension tabs. The active tab is marked with a background and an underline; the row scrolls
 // sideways when there are more tabs than fit, and the new-conversation button rides at its end.
+// Dragging one along the row reorders it, and that order is this browser's - see drawer.ts.
 // ---------------------------------------------------------------------------
 import { isAdminUser } from '@shell/store/type-map';
 // The Studio's design tokens, which SMenu and SIcon are drawn in. Imported here, the way every
@@ -46,7 +48,7 @@ import {
 } from '../agent';
 import { ensureAgentCredential } from '../credential';
 import {
-  readDrawerState, writeDrawerState, PLACEMENTS, DEFAULT_PLACEMENT, MIN_SIZE, VIEWPORT_MARGIN,
+  readDrawerState, writeDrawerState, arrange, PLACEMENTS, DEFAULT_PLACEMENT, MIN_SIZE, VIEWPORT_MARGIN,
 } from '../drawer';
 
 /** The mouse button a tab is closed with, as `MouseEvent.button` numbers it. */
@@ -54,6 +56,21 @@ const MIDDLE_BUTTON = 1;
 
 /** The id of the one stylesheet this panel reserves the dashboard's room with. */
 const RESERVATION_ID = 'mc-agent-reservation';
+
+/**
+ * How far the pointer travels before pressing a tab is a drag rather than a click.
+ *
+ * A tab is both the thing you click to switch conversation and the thing you drag to move it,
+ * so one of the two has to wait for the pointer to say which it is. A few pixels is under the
+ * wobble of a deliberate click and well inside the width of the smallest tab.
+ */
+const DRAG_THRESHOLD = 4;
+
+/** How fast the tab row scrolls when a drag reaches its edge, in pixels per frame. */
+const EDGE_SCROLL = 12;
+
+/** How close to the edge of the row a drag has to be for that to start, in pixels. */
+const EDGE_ZONE = 32;
 
 /**
  * How often the tabs re-read what their conversations are doing, for the status dots.
@@ -135,8 +152,15 @@ export default {
 
       placement: stored.placement,
       geometry:  { ...stored.geometry },
+      /** The conversation order this browser last had, by id. See drawer.ts `arrange`. */
+      order:     stored.order,
       /** The drag in progress, or null. See onGrab. */
       drag:      null,
+      /** The tab being dragged along the row, or null. See onTabGrab. */
+      tabDrag:   null,
+      // Set for the moment between a drag ending and the click that mouseup produces, which
+      // would otherwise select whichever tab had slid under the pointer. See onTabClick.
+      dropped:   false,
       // Collected with function refs rather than string ones, which is what Tabbed does and for
       // the same reason: a string ref inside v-for is an array whose order is not the list's.
       renameRef:  null,
@@ -252,8 +276,8 @@ export default {
 
     this.stopPolling();
     this.endGrab();
+    this.endTabDrag();
     window.removeEventListener('resize', this.clamp);
-
   },
 
   methods: {
@@ -292,11 +316,18 @@ export default {
       // visit was erased a moment before the code that restores it went looking for it.
       const stored = readDrawerState();
 
+      // The arrangement is the tab row itself, which is what keeps it pruned: a conversation
+      // that has ended is not in the row, so it is not written back. Guarded like `active` and
+      // for the same reason - the panel remembers before it refreshes, and an empty row at that
+      // moment means "not read yet", not "no order".
+      this.order = this.sessions.length ? this.sessions.map((session) => session.id) : stored.order;
+
       writeDrawerState({
         open:      this.open,
         active:    this.active || stored.active,
         placement: this.placement,
         geometry:  this.geometry,
+        order:     this.order,
       });
     },
 
@@ -429,7 +460,7 @@ export default {
           return '';
         });
 
-        this.sessions = await agentSessions();
+        this.sessions = arrange(await agentSessions(), this.order);
       } finally {
         this.loading = false;
       }
@@ -523,6 +554,232 @@ export default {
       }
 
       this.remember();
+    },
+
+    // -----------------------------------------------------------------------
+    // Rearranging: dragging a tab along the row
+    // -----------------------------------------------------------------------
+
+    /**
+     * A click on a tab, unless it was the end of a drag.
+     *
+     * mouseup fires a click, and by then the tab under the pointer is not the tab the drag
+     * started on - the whole point of the drag is that the row has moved underneath. Selecting
+     * on mousedown instead would take this away and take something worse with it: a tab nobody
+     * has opened yet mounts its terminal when it is selected, so dragging one into place would
+     * open a shell in the pod that nobody asked for.
+     */
+    onTabClick(id) {
+      if (!this.dropped) {
+        this.select(id);
+      }
+    },
+
+    /**
+     * Start dragging a tab, once the pointer has said that is what this is.
+     *
+     * Nothing happens here but remembering where the press was. The drag begins in onTabDrag,
+     * DRAG_THRESHOLD pixels later, so a press that turns out to be a click leaves the row
+     * exactly as it found it. Listeners go on the window rather than the tab for the reason
+     * onGrab gives: a tab that stopped tracking when the pointer left it would be a tab that
+     * cannot be dragged past its neighbour.
+     */
+    onTabGrab(id, event) {
+      // Left button only - middle closes the tab - and not on the hover controls, which have
+      // their own jobs, nor on the rename box, where the pointer is selecting text.
+      if (event.button !== 0 || this.renaming?.id === id || event.target.closest('.mc-agent__tab-control')) {
+        return;
+      }
+
+      this.tabDrag = {
+        id, startX: event.clientX, x: event.clientX, moved: false, cancelled: false, scroll: null, step: 0,
+      };
+
+      window.addEventListener('mousemove', this.onTabDrag);
+      window.addEventListener('mouseup', this.endTabDrag);
+      window.addEventListener('keydown', this.onTabDragKey, true);
+    },
+
+    onTabDrag(event) {
+      const drag = this.tabDrag;
+
+      if (!drag || drag.cancelled) {
+        return;
+      }
+      if (!drag.moved && Math.abs(event.clientX - drag.startX) < DRAG_THRESHOLD) {
+        return;
+      }
+      drag.moved = true;
+      drag.x = event.clientX;
+      // Dragging is not selecting: the labels would otherwise highlight across the row as the
+      // pointer crosses them.
+      event.preventDefault();
+      this.edgeScroll();
+      this.reorderAt(drag.x);
+    },
+
+    /**
+     * Move the dragged tab if the pointer has passed a neighbour.
+     *
+     * The tab is reordered in the row itself rather than lifted out of it and flown around: the
+     * row is the preview, so what is under the pointer when the button comes up is what has
+     * already happened, and there is no second layout to keep in step with the first.
+     *
+     * "Passed" is the midpoint of the neighbour, measured in the direction of travel. Swapping
+     * as soon as the pointer is anywhere over a neighbour oscillates when the two are different
+     * widths: the move puts the pointer back over the other one, which moves it back. The
+     * midpoint rule cannot, because after the move the pointer is behind it.
+     */
+    reorderAt(clientX) {
+      const drag = this.tabDrag;
+      const row = this.$refs.tabs;
+
+      if (!drag || !row) {
+        return;
+      }
+      const tabs = [...row.querySelectorAll('.mc-agent__tab')];
+      const from = this.sessions.findIndex((session) => session.id === drag.id);
+      const over = tabs.findIndex((el) => {
+        const box = el.getBoundingClientRect();
+
+        return clientX >= box.left && clientX <= box.right;
+      });
+
+      if (from < 0 || over < 0 || over === from) {
+        return;
+      }
+      const box = tabs[over].getBoundingClientRect();
+      const middle = box.left + (box.width / 2);
+
+      if (over > from ? clientX > middle : clientX < middle) {
+        this.moveTab(from, over);
+      }
+    },
+
+    /**
+     * Keep scrolling while the drag is held against either end of the row.
+     *
+     * The row scrolls sideways when there are more conversations than fit, and a drag that could
+     * only move tabs it can already see would not reach the ones it cannot. Driven by animation
+     * frames rather than by the pointer, because the pointer stops sending events the moment it
+     * stops moving, which is exactly when it is parked against the edge - and each frame asks
+     * for the reorder too, so tabs scrolling under a still pointer are passed like any other.
+     */
+    edgeScroll() {
+      const drag = this.tabDrag;
+      const row = this.$refs.tabs;
+
+      if (!drag || !row) {
+        return;
+      }
+      const box = row.getBoundingClientRect();
+
+      drag.step = drag.x < box.left + EDGE_ZONE ? -EDGE_SCROLL : drag.x > box.right - EDGE_ZONE ? EDGE_SCROLL : 0;
+
+      if (!drag.step) {
+        this.stopEdgeScroll();
+
+        return;
+      }
+      if (drag.scroll) {
+        return;
+      }
+
+      const tick = () => {
+        const held = this.tabDrag;
+
+        if (!held || !held.scroll) {
+          return;
+        }
+        row.scrollLeft += held.step;
+        this.reorderAt(held.x);
+        held.scroll = requestAnimationFrame(tick);
+      };
+
+      drag.scroll = requestAnimationFrame(tick);
+    },
+
+    stopEdgeScroll() {
+      if (this.tabDrag?.scroll) {
+        cancelAnimationFrame(this.tabDrag.scroll);
+        this.tabDrag.scroll = null;
+      }
+    },
+
+    /**
+     * Escape puts the row back the way it was, which is what Escape means everywhere else.
+     *
+     * The drag is marked rather than ended, because the button is still down and the click it
+     * will produce still has to be swallowed: ending here would leave that click to select
+     * whichever tab the pointer happens to be over.
+     */
+    onTabDragKey(event) {
+      if (event.key !== 'Escape' || !this.tabDrag || this.tabDrag.cancelled) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      this.stopEdgeScroll();
+      this.tabDrag.cancelled = true;
+      this.sessions = arrange(this.sessions, this.order);
+    },
+
+    endTabDrag() {
+      const drag = this.tabDrag;
+
+      if (!drag) {
+        return;
+      }
+      this.stopEdgeScroll();
+      this.tabDrag = null;
+      window.removeEventListener('mousemove', this.onTabDrag);
+      window.removeEventListener('mouseup', this.endTabDrag);
+      window.removeEventListener('keydown', this.onTabDragKey, true);
+
+      if (!drag.moved) {
+        return;
+      }
+      // The click this mouseup is about to fire lands on whatever is under the pointer now,
+      // which after a drag is not the tab that was pressed. Cleared on a timeout rather than on
+      // the next tick: the click is dispatched in the same task as this mouseup, and a
+      // macrotask is the first thing that runs after it.
+      this.dropped = true;
+      setTimeout(() => {
+        this.dropped = false;
+      }, 0);
+
+      if (!drag.cancelled) {
+        this.remember();
+      }
+    },
+
+    /** Put one tab at another's index, without disturbing the rest. */
+    moveTab(from, to) {
+      const next = [...this.sessions];
+      const [moved] = next.splice(from, 1);
+
+      next.splice(to, 0, moved);
+      this.sessions = next;
+    },
+
+    /**
+     * Move the focused tab one place, for a keyboard.
+     *
+     * The controls on a tab appear on focus as well as on hover so they can be reached without
+     * a mouse, and rearranging is the same promise. Alt rather than a bare arrow, because a
+     * bare arrow in a tablist is how focus moves between tabs and that is worth leaving free.
+     */
+    nudgeTab(id, step) {
+      const from = this.sessions.findIndex((session) => session.id === id);
+      const to = from + step;
+
+      if (from < 0 || to < 0 || to >= this.sessions.length) {
+        return;
+      }
+      this.moveTab(from, to);
+      this.remember();
+      // The tab moved; focus stayed on the element that was in its place.
+      this.$nextTick(() => this.$refs.tabs?.querySelectorAll('.mc-agent__tab')[to]?.focus());
     },
 
     /** Start another conversation. The pod picks the name; see startAgentSession for why. */
@@ -672,14 +929,20 @@ export default {
 
     <div class="mc-agent__row">
       <!--
-        Conversations as tabs: one per conversation, click to switch. The rename pencil and the
-        close control appear on hover, and on keyboard focus so they are reachable without a
-        mouse; they sit in reserved trailing space, so a tab does not change width as the pointer
-        crosses it. The row scrolls sideways when there are more tabs than fit, and the new-
-        conversation button rides at its end where a new tab would appear.
+        Conversations as tabs: one per conversation, click to switch, drag to rearrange. The
+        rename pencil and the close control appear on hover, and on keyboard focus so they are
+        reachable without a mouse; they sit in reserved trailing space, so a tab does not change
+        width as the pointer crosses it. The row scrolls sideways when there are more tabs than
+        fit, and the new-conversation button rides at its end where a new tab would appear.
+
+        The order a tab is dragged into is this browser's, not the pod's: see the note in
+        drawer.ts for which half of this panel is a fact about the cluster and which half is
+        one person's arrangement of it.
       -->
       <div
+        ref="tabs"
         class="mc-agent__tabs"
+        :class="{ 'mc-agent__tabs--dragging': !!tabDrag }"
         role="tablist"
         aria-label="Conversations"
       >
@@ -688,15 +951,21 @@ export default {
           :id="`tab-${ session.id }`"
           :key="session.id"
           class="mc-agent__tab"
-          :class="{ 'mc-agent__tab--active': session.id === active }"
+          :class="{
+            'mc-agent__tab--active': session.id === active,
+            'mc-agent__tab--lifted': tabDrag && tabDrag.moved && tabDrag.id === session.id,
+          }"
           role="tab"
           :tabindex="session.id === active ? 0 : -1"
           :aria-selected="session.id === active"
           :aria-controls="session.id"
           :title="session.title"
-          @click="select(session.id)"
+          @click="onTabClick(session.id)"
           @keydown.enter.prevent="select(session.id)"
+          @keydown.alt.left.prevent="nudgeTab(session.id, -1)"
+          @keydown.alt.right.prevent="nudgeTab(session.id, 1)"
           @dblclick="startRename(session.id)"
+          @mousedown="onTabGrab(session.id, $event)"
           @mousedown.middle.prevent="closeSession(session.id)"
         >
           <input
@@ -1104,6 +1373,13 @@ export default {
     &::-webkit-scrollbar {
       height: 6px;
     }
+
+    // While a tab is being dragged the whole row is the drag: the cursor stays closed wherever
+    // the pointer goes, and nothing in the row takes a text selection as it passes.
+    &--dragging {
+      cursor: grabbing;
+      user-select: none;
+    }
   }
 
   &__tab {
@@ -1145,6 +1421,16 @@ export default {
     // space is given back to the box.
     &:has(.mc-agent__rename) {
       padding-right: 10px;
+    }
+
+    // The tab under the pointer during a drag. It is in the row rather than flying above it -
+    // the row is its own preview - so this says which one is being moved and nothing more.
+    // The resting cursor stays `pointer`: a tab is a thing you click, and browser tabs have
+    // spent twenty years teaching that one can be dragged without a hand to say so.
+    &--lifted {
+      background: var(--default-hover-bg, var(--body-bg));
+      opacity: 0.75;
+      cursor: grabbing;
     }
   }
 

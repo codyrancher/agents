@@ -13,7 +13,7 @@
 // that pod reaches - and every read and write here is a short exec along the same path.
 import {
   parseTranscript, renderMarkdown, renderPlain, linkPaths, readPane, toolSummary, projectKey, agentsFrom, noteFrom } from '../chat';
-import { deriveState, parseEntries, sentSeen } from '../chat-state.mjs';
+import { deriveState, parseEntries, reconcilePending, unwrapPasted } from '../chat-state.mjs';
 import { readLook, writeLook } from '../look';
 import {
   modelAliases, flagChoices, parseMcpList, currentModel, isSafeOptionValue
@@ -411,7 +411,8 @@ export default {
       // Only on the main conversation: a message typed here goes to claude, never to one of
       // the subagents whose transcript the tabs show.
       // The CLI queues a background task's completion the same way; that row is a note.
-      const queued = (this.state.queue || []).map((text, i) => {
+      const queued = (this.state.queue || []).map((raw, i) => {
+        const text = unwrapPasted(raw);
         const note = noteFrom(text);
 
         return {
@@ -445,7 +446,7 @@ export default {
     rendered() {
       return this.shown.map((m) => ({
         ...m,
-        html:      m.role === 'user' ? renderPlain(m.text) : linkPaths(renderMarkdown(m.text)),
+        html:      m.role === 'user' ? renderPlain(m.text, m.parts) : linkPaths(renderMarkdown(m.text)),
         queued:    !!m.queued,
         inQueue:   !!m.inQueue,
         failed:    !!m.failed,
@@ -1293,30 +1294,13 @@ export default {
      * Retire what this box sent once claude has recorded it anywhere - as a queued item, as a
      * prompt, or as the hook's UserPromptSubmit - and say so when it has not.
      *
-     * The old version matched sent text against the user turns in the transcript, which retired
-     * a message only once claude *started* on it: everything typed while it was busy sat marked
-     * "queued" until then, and anything the paste did not land at all sat there for ever. Now
-     * the CLI's own queue is drawn from its record (state.queue) and this list is only the gap
-     * between Enter and that record - seconds, or a delivery failure, which is shown as one.
+     * The rule and the evidence are in chat-state.mjs, which the verifier runs against a real
+     * claude; here it is only the four things to reconcile against.
      */
     prunePending() {
-      if (!this.pending.length) {
-        return;
-      }
-      if (this.pane.gone) {
-        // No claude to have taken it: the message is not going anywhere from here.
-        this.pending = this.pending.map((p) => ({ ...p, failed: true }));
-
-        return;
-      }
-      const now = Date.now();
-      const left = this.pending
-        .filter((p) => !sentSeen(p.text, p.sentAt, this.entries, this.hook, this.state.queue))
-        .map((p) => (now - p.sentAt > 20000 && !p.failed ? { ...p, failed: true } : p));
-
-      if (left.length !== this.pending.length || left.some((p, i) => p.failed !== this.pending[i]?.failed)) {
-        this.pending = left;
-      }
+      this.pending = reconcilePending(this.pending, {
+        entries: this.entries, hook: this.hook, queue: this.state.queue, gone: this.pane.gone,
+      });
     },
 
     /**
@@ -1934,7 +1918,7 @@ export default {
       >
         <div class="mc-chat__meta">
           <span class="mc-chat__who">{{ m.role === 'user' ? 'You' : m.role === 'summary' ? 'Summary' : m.role === 'note' ? 'Claude Code' : 'Claude' }}</span>
-          <span class="mc-chat__when">{{ m.failed ? 'not delivered' : m.queued ? 'queued' : when(m.at) }}</span>
+          <span class="mc-chat__when">{{ m.failed ? 'not recorded' : m.queued ? 'queued' : when(m.at) }}</span>
           <!--
             Said, rather than shown as an ordinary message, because it is not in the
             conversation yet: claude is mid-turn and has this waiting in its input queue. It
@@ -1943,8 +1927,8 @@ export default {
           <span
             v-if="m.failed"
             class="mc-chat__queued-note mc-chat__queued-note--failed"
-            title="Claude never recorded this message - the paste into the pane did not land"
-          >claude did not receive this ·
+            title="Nothing claude writes down mentions this message - not the transcript, not its input queue, not the submit hook. Usually the paste into the pane did not land."
+          >claude has no record of this ·
             <button
               type="button"
               class="mc-chat__link"
@@ -3084,6 +3068,43 @@ export default {
   }
 
   :deep(.mc-chat__chip--missing) { color: var(--muted); text-decoration: line-through; }
+
+  // A paste, folded the way the input box folded it when it was pasted. Closed, it is one
+  // line saying how much there is; open, it is the paste, scrolling in its own box rather
+  // than pushing the rest of the conversation off the screen.
+  :deep(.mc-chat__paste) {
+    margin: 4px 0;
+  }
+
+  :deep(.mc-chat__paste > summary) {
+    cursor:        pointer;
+    display:       inline-flex;
+    align-items:   center;
+    gap:           4px;
+    padding:       1px 8px;
+    border:        1px solid var(--border);
+    border-radius: 10px;
+    background:    var(--body-bg);
+    color:         var(--muted);
+    font-size:     11px;
+    user-select:   none;
+  }
+
+  :deep(.mc-chat__paste > summary:hover) { color: var(--link); border-color: color-mix(in srgb, var(--link) 40%, var(--border)); }
+  :deep(.mc-chat__paste[open] > summary) { margin-bottom: 2px; }
+
+  :deep(.mc-chat__paste > pre) {
+    margin:        0;
+    padding:       6px 8px;
+    font-size:     11px;
+    background:    var(--body-bg);
+    border:        1px solid var(--border);
+    border-radius: 4px;
+    white-space:   pre-wrap;
+    word-break:    break-word;
+    max-height:    320px;
+    overflow:      auto;
+  }
 
   &__images {
     list-style:  none;

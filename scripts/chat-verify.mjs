@@ -14,7 +14,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { deriveState, isPromptEntry, parseEntries, sentSeen } from '/workspace/.chat-state.mjs';
+import {
+  deriveState, isPromptEntry, parseEntries, sentSeen, splitPasted, unwrapPasted
+} from '/workspace/.chat-state.mjs';
 
 const SESSION = process.argv[2] || 'verify-1';
 const HOME = process.env.HOME || '/workspace/.home';
@@ -256,6 +258,23 @@ console.log(`      recorded as: ${ JSON.stringify((s.entries.filter(isPromptEntr
 try {
   fs.unlinkSync(shot);
 } catch { /* already gone */ }
+
+// S10: a message long enough that the input box folds the paste.
+// Every message this view sends is a bracketed paste, and past about a hundred characters the
+// CLI folds one into `[Pasted text #1]` and writes it back to the transcript wrapped in
+// `<pasted_content>` tags. So the message claude answered and the message that was sent are
+// not the same string - which is how a delivered message came to be shown twice, the second
+// copy saying it had failed. Long enough to be folded, and checked both ways: that the view
+// reads it as delivered, and that what it would draw is the sentence rather than the tags.
+const longer = `Reply with exactly the word LONG and nothing else. This sentence is here only to carry the message past the length at which the input box folds a paste into a placeholder, which is what puts the tags around it. ${ Date.now().toString(36) }`;
+const t10 = send(longer);
+
+await waitFor('S10 a folded paste reads as seen', (s) => sentSeen(longer, t10, s.entries, s.hook, s.state.queue), 20000);
+s = await waitFor('S10 idle again after it', (s) => s.state.phase === 'idle', 180000);
+const recorded10 = (s.entries.filter(isPromptEntry).pop() || {}).message?.content?.[0]?.text || '';
+
+console.log(`      recorded as: ${ JSON.stringify(recorded10.slice(0, 80)) }`);
+console.log(`      wrapped: ${ recorded10.includes('<pasted_content id="') }  unwraps to the sentence: ${ unwrapPasted(recorded10).trim() === longer }  parts: ${ splitPasted(recorded10).map((part) => part.kind).join('+') }`);
 
 // S7: interrupting a turn.
 send('Run this shell command: sleep 90');
