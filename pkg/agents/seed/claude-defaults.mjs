@@ -62,8 +62,18 @@ function update(file, mutate) {
     return false;
   }
 
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, `${ JSON.stringify(after, null, 2) }\n`, { mode: 0o600 });
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, `${ JSON.stringify(after, null, 2) }\n`, { mode: 0o600 });
+  } catch (e) {
+    // A pane that cannot be pre-answered is worth having; a pane that will not start is not.
+    // This threw and took the conversation with it when the file had ended up owned by root
+    // (see shell.sh, which now repairs that before we get here): every tab in the pod showed
+    // an EACCES stack instead of claude. Say what happened and let claude ask its questions.
+    console.log(`[claude] could not write ${ file }: ${ e?.message || e }`);
+
+    return false;
+  }
 
   return true;
 }

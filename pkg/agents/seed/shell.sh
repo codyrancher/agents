@@ -106,8 +106,19 @@ for f in /seed/skills"$SKILL_SEP"*; do
   cp "$f" "$dest"
 done
 
-if [ "$(id -u)" = 0 ] && [ -d "$HOME_DIR/.claude" ]; then
-  chown -R node:node "$HOME_DIR/.claude" 2>/dev/null || true
+# Everything in the pane's home has to belong to the pane's user.
+#
+# The home outlives the pod, so one file written by something running as root - a root exec
+# that happened to carry this HOME, a script that forgot to drop - stays root-owned for ever,
+# and claude cannot start without writing its own config: EACCES on
+# /workspace/.home/.claude.json, from claude-defaults.mjs, killed every conversation in the
+# pod until the file was chowned by hand. So the repair covers the config and its lock as well
+# as the directory, and it runs on every pane start rather than only when something is wrong.
+if [ "$(id -u)" = 0 ]; then
+  [ -d "$HOME_DIR/.claude" ] && chown -R node:node "$HOME_DIR/.claude" 2>/dev/null || true
+  for f in "$HOME_DIR/.claude.json" "$HOME_DIR/.claude.json.backup" "$HOME_DIR/.claude.json.lock"; do
+    [ -e "$f" ] && chown -R node:node "$f" 2>/dev/null || true
+  done
 fi
 
 HOME_DIR="$HOME_DIR" TRUST_DIRS="$WORKDIR" /bin/sh /seed/terminal-tools.sh
