@@ -48,10 +48,18 @@ ensure_sftp() {
 
 mount_one() {
   name=$1; cluster=$2; dir=/workspaces/$name
-  mountpoint -q "$dir" 2>/dev/null && return 0
+  # Already mounted and answering: nothing to do. A live sshfs mount stats quickly.
+  if mountpoint -q "$dir" 2>/dev/null; then
+    timeout 5 ls "$dir" >/dev/null 2>&1 && return 0
+    # Mounted but dead: the exec channel dropped and reconnect did not bring it back, so every
+    # access is an I/O error (and mkdir below would fail on it). Force it off - lazily, in case a
+    # handle is stuck - so it can be remounted fresh this pass.
+    echo "$(date -u +%FT%TZ) $name mount is dead, remounting"
+    fusermount3 -uz "$dir" 2>/dev/null || umount -l "$dir" 2>/dev/null
+  fi
   ensure_sftp "$name" "$cluster"
   write_wrapper "$name" "$cluster"
-  mkdir -p "$dir"
+  mkdir -p "$dir" 2>/dev/null
   sshfs -o ssh_command="$WRAP/$name.sftp" x:/workspaces/$name "$dir" \
     -o reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,allow_other 2>/dev/null \
     && echo "$(date -u +%FT%TZ) mounted $name ($cluster)"
@@ -104,9 +112,10 @@ while true; do
       [ "$cluster" = "$LOCAL" ] && continue
       # A preview is a built page with no shell, so nothing runs a conversation in it.
       case "$name" in preview-*) continue ;; esac
-      mountpoint -q "/workspaces/$name" 2>/dev/null || mount_one "$name" "$cluster"
-      # Once mounted, lay the seed into it (from here - the workspace pod can't fetch it itself).
-      mountpoint -q "/workspaces/$name" 2>/dev/null && layout_one "$name" "$cluster"
+      # mount_one mounts if absent and remounts if the existing mount has gone dead.
+      mount_one "$name" "$cluster"
+      # Once it answers, lay the seed into it (from here - the workspace pod can't fetch it itself).
+      timeout 5 ls "/workspaces/$name" >/dev/null 2>&1 && layout_one "$name" "$cluster"
     done
   fi
   sleep 20
