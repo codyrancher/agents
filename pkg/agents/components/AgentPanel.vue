@@ -657,28 +657,31 @@ export default {
     },
 
     /**
-     * Where each tab sits in the row, ignoring the lift.
+     * Where each tab sits in the row, with whatever is being drawn on it taken off.
      *
-     * The dragged tab is drawn translated, so its own rect is where it is being shown rather
-     * than where the row has put it - and where the row has put it is the question every
-     * measurement here is asking. Taking the offset back off is the correction; the transform
-     * does not affect layout, so nothing else needs one.
+     * Every measurement in a drag is asking where the row has *put* a tab, and two different
+     * things here are drawing tabs somewhere else: the lift, which follows the pointer, and
+     * the slide, which is a tab travelling to a place it has already been given. A rect is
+     * where a tab is being drawn, so both would be measured instead of the slot - the dragged
+     * one would chase the pointer it is supposed to be compared against, and a tab still
+     * travelling would be passed at the position it is leaving.
+     *
+     * So the correction is one rule rather than one special case: subtract the transform that
+     * is actually on the element, interpolated value and all. A transform does not affect
+     * layout, so what is left is the slot.
      */
     tabSlots() {
       const row = this.$refs.tabs;
-      const drag = this.tabDrag;
 
-      if (!row || !drag) {
+      if (!row) {
         return [];
       }
 
-      return [...row.querySelectorAll('.mc-agent__tab')].map((el, i) => {
+      return [...row.querySelectorAll('.mc-agent__tab')].map((el) => {
         const box = el.getBoundingClientRect();
-        const shift = this.sessions[i]?.id === drag.id ? this.tabOffset : 0;
+        const shift = new DOMMatrixReadOnly(getComputedStyle(el).transform).m41;
 
-        return {
-          el, left: box.left - shift, right: box.right - shift, width: box.width,
-        };
+        return { left: box.left - shift, right: box.right - shift, width: box.width };
       });
     },
 
@@ -836,6 +839,8 @@ export default {
       if (!row) {
         return;
       }
+      const put = [];
+
       [...row.querySelectorAll('.mc-agent__tab')].forEach((el, i) => {
         const id = this.sessions[i]?.id;
         const before = was.get(id);
@@ -850,10 +855,26 @@ export default {
         }
         el.style.transition = 'none';
         el.style.transform = `translateX(${ delta }px)`;
-        requestAnimationFrame(() => {
-          el.style.transition = '';
-          el.style.transform = '';
-        });
+        put.push(el);
+      });
+
+      if (!put.length) {
+        return;
+      }
+      // Measure, for the side effect: the browser has to lay the row out to answer, which
+      // commits that start position as a style of its own. Without the read the two writes
+      // either side of it coalesce into one and there is nothing to travel from.
+      //
+      // It has to be this frame. Taking the transform off in the next one instead left every
+      // tab parked at the position it was about to leave for the whole of the frame in
+      // between - and a drag asks where the tabs are once per frame, so the next reorder
+      // measured that parked position and started the next slide from it. Three tabs passed
+      // quickly and a tab was travelling from three places ago, which is the flicker: a snap
+      // out to the end of the row, then the slide back.
+      row.getBoundingClientRect();
+      put.forEach((el) => {
+        el.style.transition = '';
+        el.style.transform = '';
       });
     },
 
