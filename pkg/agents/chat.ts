@@ -17,6 +17,7 @@
 // fetching and the sending.
 
 import { highlight } from './highlight';
+import { splitPasted } from './chat-state.mjs';
 
 export interface ChatToolCall {
   id: string;
@@ -42,7 +43,15 @@ export interface ChatMessage {
   thinking: string;
   /** Files a user message attached (the paths claude was handed). */
   images: string[];
+  /** A user message split into what was typed and what was pasted; see renderPlain. */
+  parts?: PromptPart[];
   at: string;
+}
+
+/** One run of a person's message: what they typed, or one block they pasted. */
+export interface PromptPart {
+  kind: 'text' | 'paste';
+  text: string;
 }
 
 /**
@@ -70,7 +79,8 @@ export function parseTranscript(lines: string[]): ChatMessage[] {
     // turn, timestamped when it was typed - never as a user line. It is the person speaking all
     // the same, and without this it vanished from the log the moment claude started reading it.
     if (entry?.type === 'attachment' && entry.attachment?.type === 'queued_command') {
-      const prompt = String(entry.attachment.prompt || '').trim();
+      const queued: PromptPart[] = splitPasted(entry.attachment.prompt);
+      const prompt = queued.map((part) => part.text).join('').trim();
       // A background task's completion arrives this way too when a turn is running - the CLI
       // queues it like anything typed - and it is the CLI's line, not the person's.
       const note = noteFrom(prompt);
@@ -83,7 +93,7 @@ export function parseTranscript(lines: string[]): ChatMessage[] {
         }
       } else if (prompt) {
         messages.push({
-          key: entry.uuid || `${ messages.length }`, role: 'user', text: prompt, tools: [], thinking: '', images: [], at: entry.timestamp || '',
+          key: entry.uuid || `${ messages.length }`, role: 'user', text: prompt, tools: [], thinking: '', images: [], parts: queued, at: entry.timestamp || '',
         });
       }
       continue;
@@ -123,8 +133,15 @@ export function parseTranscript(lines: string[]): ChatMessage[] {
       const images = blocks.filter((b) => b.type === 'image').map((b, i) => imageUrl(b) || b.source?.path || `image ${ i + 1 }`);
       // The CLI puts `[Image #1]` where a pasted image path was; the image itself is shown
       // beside the text, so the marker is furniture here.
-      const text = blocks.filter((b) => b.type === 'text').map((b) => String(b.text || '')).join('\n')
-        .replace(images.length ? /\[Image[^\]]*\]\s*/g : /$^/, '').trim();
+      // Split before anything reads it. A message big enough for the input box to fold into
+      // `[Pasted text #1]` is written back into the transcript wrapped in `<pasted_content>`
+      // tags, and every question asked below - is this the CLI's own line, is it a compact
+      // summary, is there anything here at all - is a question about what the person said,
+      // not about the CLI's rendering of it. `text` is the sentence; `parts` is how it was
+      // written, which is what renderPlain draws.
+      const parts: PromptPart[] = splitPasted(blocks.filter((b) => b.type === 'text').map((b) => String(b.text || '')).join('\n')
+        .replace(images.length ? /\[Image[^\]]*\]\s*/g : /$^/, ''));
+      const text = parts.map((part) => part.text).join('').trim();
 
       // A user line that is only tool results is not something the person said.
       if (!text && !images.length) {
@@ -149,7 +166,7 @@ export function parseTranscript(lines: string[]): ChatMessage[] {
       const summary = entry.isCompactSummary === true || /^This session is being continued from a previous conversation/.test(text);
 
       messages.push({
-        key: entry.uuid || `${ messages.length }`, role: summary ? 'summary' : 'user', text, tools: [], thinking: '', images, at,
+        key: entry.uuid || `${ messages.length }`, role: summary ? 'summary' : 'user', text, tools: [], thinking: '', images, parts, at,
       });
       continue;
     }
@@ -594,9 +611,33 @@ export function linkPaths(html: string): string {
   });
 }
 
-/** Plain text (a person's message) as HTML: escaped, line breaks kept, paths clickable. */
-export function renderPlain(text: string): string {
-  return linkPaths(escapeHtml(text || '').replace(/\n/g, '<br>'));
+/** A paste long enough that the input box folded it is worth folding here too. */
+const FOLD_LINES = 6;
+const FOLD_CHARS = 320;
+
+/**
+ * Plain text (a person's message) as HTML: escaped, line breaks kept, paths clickable.
+ *
+ * Pasted blocks are drawn as blocks. A short one reads as part of the sentence, because that
+ * is how it was written - a path, a URL, an error dropped mid-thought - and pulling it out
+ * into furniture would say something about it that is not true. A long one is folded, the way
+ * the input box folded it when it was pasted: what the person saw when they sent it was
+ * `[Pasted text #1 +40 lines]`, and a log that spells the forty lines out is not the message,
+ * it is the attachment wearing the message's clothes. <details> rather than a handler, so a
+ * message in the log opens without the view knowing anything about it.
+ */
+export function renderPlain(text: string, parts?: PromptPart[]): string {
+  const plain = (t: string) => linkPaths(escapeHtml(t).replace(/\n/g, '<br>'));
+
+  return (parts || splitPasted(text)).map((part) => {
+    const lines = part.text.split('\n').length;
+
+    if (part.kind !== 'paste' || (lines < FOLD_LINES && part.text.length < FOLD_CHARS)) {
+      return plain(part.text);
+    }
+
+    return `<details class="mc-chat__paste"><summary>Pasted text · ${ lines } line${ lines === 1 ? '' : 's' }</summary><pre>${ escapeHtml(part.text) }</pre></details>`;
+  }).join('');
 }
 
 // ── Subagents: the conversations a conversation started ─────────────────────────────────────

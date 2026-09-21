@@ -477,56 +477,243 @@ export function deriveState(input) {
 }
 
 /**
- * Whether a message this view sent has been taken by claude: it is in the queue, or it became
- * the prompt of a turn, or the hook saw it submitted. Text-equal, and only on or after the
- * moment it was sent; a message that matches nothing for a while was not delivered.
+ * ── What the CLI does to the words before it writes them down ──────────────────────────
+ *
+ * A message sent from this view is a bracketed paste into the CLI's input box (say(), in
+ * ChatPane), and past about a hundred characters - or at the first newline - the box folds a
+ * paste into a placeholder, `[Pasted text #1]`. At submit it writes the placeholder back out
+ * into the transcript, wrapped:
+ *
+ *     <pasted_content id="9232">
+ *     Also, it seems like I'm having an issue with the new workspace I just created …
+ *     </pasted_content id="9232">
+ *
+ * So the sentence that was sent and the sentence that was recorded are two different strings,
+ * and both of the things this view does with a person's message were wrong about it. The log
+ * drew the tags, verbatim, with the sentence inside them. The matcher, comparing character for
+ * character, never saw the two as one message, so the copy held while the transcript caught up
+ * stayed on screen and then said it had not been delivered. One message, shown twice, the
+ * second copy carrying an error.
+ *
+ * The closing tag carries the id, which makes it not XML, so a general tag strip does not
+ * match it. Read here the way the CLI reads it - the id is four hex characters, each tag owns
+ * the newline after it, and the blank lines the CLI put around the block come away with it -
+ * so text that merely mentions `<pasted_content id="…">` is left alone.
  */
+
+const PASTE_OPEN = '<pasted_content id="';
+const PASTE_ID = /^[0-9a-f]{4}$/;
+
+/** @typedef {{ kind: 'text'|'paste', text: string }} PromptPart */
+
+/**
+ * A recorded prompt split into what was typed and what was pasted, in order.
+ *
+ * @param {string} text
+ * @returns {PromptPart[]}
+ */
+export function splitPasted(text) {
+  const s = String(text || '');
+  /** @type {PromptPart[]} */
+  const parts = [];
+  let from = 0;
+  let at = 0;
+
+  for (;;) {
+    const open = s.indexOf(PASTE_OPEN, at);
+
+    if (open < 0) {
+      break;
+    }
+    const idAt = open + PASTE_OPEN.length;
+    const id = s.slice(idAt, idAt + 4);
+
+    if (!PASTE_ID.test(id) || !s.startsWith('">\n', idAt + 4)) {
+      at = idAt;
+      continue;
+    }
+    const bodyAt = idAt + 4 + 3;
+    const close = `\n</pasted_content id="${ id }">`;
+    const closeAt = s.indexOf(close, bodyAt - 1);
+
+    if (closeAt < 0) {
+      break;
+    }
+    // The blank line the CLI put in front of the block belongs to the block, not to the
+    // sentence before it; the same after it. Taking them here is what makes the unwrapped
+    // text read as the one thing the person sent.
+    let head = open;
+
+    for (let i = 0; i < 2 && head > from && s[head - 1] === '\n'; i++) {
+      head--;
+    }
+    if (head > from) {
+      parts.push({ kind: 'text', text: s.slice(from, head) });
+    }
+    parts.push({ kind: 'paste', text: s.slice(bodyAt, closeAt) });
+    from = closeAt + close.length;
+    for (let i = 0; i < 2 && s[from] === '\n'; i++) {
+      from++;
+    }
+    at = from;
+  }
+  if (from < s.length) {
+    parts.push({ kind: 'text', text: s.slice(from) });
+  }
+
+  return parts;
+}
+
+/** The same prompt as the person wrote it: the tags gone, nothing else changed. */
+export function unwrapPasted(text) {
+  return splitPasted(text).map((p) => p.text).join('');
+}
+
 /**
  * A prompt's text as it compares, on either side of the CLI.
  *
- * The CLI rewrites what was typed before it records it. An image path pasted into the box -
- * the chat's own screenshots go in as `/workspace/.images/….png` - is read, replaced by
- * `[Image #1]` (or `[Image: source: …]`) and moved to the front, so the text sent and the text
- * recorded differ exactly there, and an exact match said "not delivered - send again" of a message claude was already
- * answering. Both sides lose the image marks, the image paths and the spacing between.
+ * Everything the CLI rewrites between the box and the transcript comes out here, on both
+ * sides, so what is compared is the sentence rather than the CLI's rendering of it:
+ *
+ *   - a paste, wrapped in `<pasted_content>` tags (above);
+ *   - an image path - the chat's own screenshots go in as `/workspace/.images/….png` - read,
+ *     replaced by `[Image #1]` (or `[Image: source: …]`) and moved to the front;
+ *   - a paste the box was still showing folded, as `[Pasted text #1 +40 lines]`, or trimmed,
+ *     as `[...Truncated text #1 …]`;
+ *   - the spacing left behind by any of it.
  */
 export function promptKey(text) {
-  return String(text || '')
-    .replace(/\[Image[^\]]*\]/g, ' ')
+  return unwrapPasted(text)
+    .replace(/\[(?:Image|Pasted text|\.{3}Truncated text)[^\]]*\]/g, ' ')
     .replace(/(^|\s)\/\S+\.(png|jpe?g|gif|webp|bmp)(?=\s|$)/gi, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
 
-export function sentSeen(text, sentAt, entries, hook, queue) {
-  const wanted = promptKey(text);
+/**
+ * The CLI's own user lines rather than a person's: a background task finishing, a reminder,
+ * the summary a compact writes back into the conversation.
+ *
+ * isPromptEntry counts all three, because each of them does start a turn and the phase has to
+ * say so. None of them is evidence that a message typed here landed, which is what separates
+ * this from that: a `<task-notification>` arriving two seconds after Enter must not be read as
+ * the message being delivered.
+ */
+function isCliPrompt(entry) {
+  const text = textOf(entry);
 
-  if (!wanted) {
-    return true;
-  }
-  if (queue.some((q) => promptKey(q) === wanted)) {
-    return true;
-  }
-  if (hook?.event === 'UserPromptSubmit' && promptKey(hook.prompt) === wanted && Date.parse(hook.at) >= sentAt - 2000) {
-    return true;
-  }
-  for (let i = entries.length - 1; i >= 0; i--) {
-    const entry = entries[i];
+  return entry.isCompactSummary === true ||
+    /^\s*<(task-notification|system-reminder)>/.test(text) ||
+    /^This session is being continued from a previous conversation/.test(text);
+}
+
+/**
+ * Every record of a prompt having reached claude, oldest first.
+ *
+ * Five channels write one and a message appears in whichever is quickest, so this is the whole
+ * evidence that something typed here landed: the CLI's live input queue, the UserPromptSubmit
+ * hook, the `enqueue` written when a message is typed into a running turn, the attachment
+ * written when that message is absorbed into the turn, and the user line of the transcript.
+ *
+ * `at` is when claude has it; a queue entry is the live list, so it is now by definition.
+ */
+export function promptRecords(entries, hook, queue = [], now = Date.now()) {
+  const records = [];
+
+  for (const entry of entries) {
     const at = Date.parse(entry.timestamp || '') || 0;
 
-    if (at && at < sentAt - 2000) {
-      break;
-    }
-    if (entry.type === 'queue-operation' && entry.operation === 'enqueue' && promptKey(entry.content) === wanted) {
-      return true;
-    }
-    if (entry.type === 'attachment' && entry.attachment?.type === 'queued_command' && promptKey(entry.attachment.prompt) === wanted) {
-      return true;
-    }
-    if (isPromptEntry(entry) && promptKey(textOf(entry)) === wanted) {
-      return true;
+    if (entry.type === 'queue-operation' && entry.operation === 'enqueue') {
+      records.push({ key: promptKey(entry.content), at });
+    } else if (entry.type === 'attachment' && entry.attachment?.type === 'queued_command') {
+      records.push({ key: promptKey(entry.attachment.prompt), at });
+    } else if (isPromptEntry(entry) && !isCliPrompt(entry)) {
+      records.push({ key: promptKey(textOf(entry)), at });
     }
   }
+  if (hook?.event === 'UserPromptSubmit') {
+    records.push({ key: promptKey(hook.prompt), at: Date.parse(hook.at || '') || now });
+  }
+  records.sort((a, b) => a.at - b.at);
+  // Last, and timeless: what is in the queue is waiting right now, whenever it was typed.
+  for (const text of queue) {
+    records.push({ key: promptKey(text), at: now });
+  }
 
-  return false;
+  return records.filter((r) => r.key);
+}
+
+/** Clock slack between the moment Enter was pressed here and the timestamp claude writes. */
+const GRACE = 2000;
+/** How long a message with no record of it anywhere may go before the view says so. */
+const UNRECORDED_AFTER = 20000;
+
+/**
+ * Reconcile the copies this view is holding against claude's own record of them.
+ *
+ * The copies exist for one reason: the seconds between Enter and the transcript line, where a
+ * log that showed only what claude had written down would be missing the thing just sent. So
+ * the moment there is a record, the copy goes - and what is left on screen is the transcript,
+ * once, which is the only version of a message that can be trusted to be what claude read.
+ *
+ * Matched in two passes, because matching on the text alone is what kept going wrong. First by
+ * what was said: each record is spent on at most one copy, so saying the same thing twice
+ * retires one and leaves the other showing. Then, for anything still outstanding, by order:
+ * an unclaimed prompt claude recorded after this one was sent retires the oldest copy waiting
+ * on one. That second pass is the part that does not rot. The CLI reshapes a prompt on its way
+ * to the transcript whenever it likes - `[Image #1]` yesterday, `<pasted_content>` today - and
+ * every one of those has shown up here as a delivered message wearing "not delivered". Order
+ * survives all of it: nothing but this box and the terminal beside it can put a prompt into
+ * that pane, and if the person typed one there directly, the message did go in.
+ */
+export function reconcilePending(pending, {
+  entries = [], hook = null, queue = [], gone = false, now = Date.now(),
+} = {}) {
+  if (!pending.length) {
+    return pending;
+  }
+  if (gone) {
+    // No claude to have taken it: the message is not going anywhere from here.
+    return same(pending, pending.map((p) => (p.failed ? p : { ...p, failed: true })));
+  }
+  const records = promptRecords(entries, hook, queue, now);
+  const spent = new Set();
+  const claim = (from, wanted) => {
+    const hit = records.findIndex((r, i) => !spent.has(i) && r.at >= from - GRACE && (wanted === null || r.key === wanted));
+
+    if (hit >= 0) {
+      spent.add(hit);
+    }
+
+    return hit >= 0;
+  };
+  // A copy of something that is not a prompt at all - a slash command, an empty box - has
+  // nothing to wait for; it is not this list's business.
+  const waiting = pending.map((p) => ({ p, key: promptKey(p.text) })).filter((w) => !!w.key);
+  const left = waiting.filter((w) => !claim(w.p.sentAt, w.key)).map((w) => w.p);
+  const still = left.filter((p) => !claim(p.sentAt, null))
+    .map((p) => (now - p.sentAt > UNRECORDED_AFTER && !p.failed ? { ...p, failed: true } : p));
+
+  return same(pending, still);
+}
+
+/** The list it was given when nothing about it changed, so a watcher does not fire on a copy. */
+function same(before, after) {
+  const unchanged = before.length === after.length && after.every((p, i) => p === before[i]);
+
+  return unchanged ? before : after;
+}
+
+/**
+ * Whether one message this view sent has reached claude - the single-message form of
+ * reconcilePending, for the verifier.
+ */
+export function sentSeen(text, sentAt, entries, hook, queue) {
+  if (!promptKey(text)) {
+    return true;
+  }
+
+  return !reconcilePending([{ text, sentAt }], {
+    entries, hook, queue, now: sentAt,
+  }).length;
 }
