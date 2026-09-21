@@ -158,6 +158,8 @@ export default {
       drag:      null,
       /** The tab being dragged along the row, or null. See onTabGrab. */
       tabDrag:   null,
+      /** How far the dragged tab is drawn from its slot, in pixels. See liftToPointer. */
+      tabOffset: 0,
       // Set for the moment between a drag ending and the click that mouseup produces, which
       // would otherwise select whichever tab had slid under the pointer. See onTabClick.
       dropped:   false,
@@ -177,6 +179,11 @@ export default {
      */
     admin() {
       return isAdminUser(this.$store.getters);
+    },
+
+    /** The conversation being dragged, once the pointer has said that is what this is. */
+    lifted() {
+      return this.tabDrag?.moved ? this.tabDrag.id : '';
     },
 
     /**
@@ -578,11 +585,12 @@ export default {
     /**
      * Start dragging a tab, once the pointer has said that is what this is.
      *
-     * Nothing happens here but remembering where the press was. The drag begins in onTabDrag,
-     * DRAG_THRESHOLD pixels later, so a press that turns out to be a click leaves the row
-     * exactly as it found it. Listeners go on the window rather than the tab for the reason
-     * onGrab gives: a tab that stopped tracking when the pointer left it would be a tab that
-     * cannot be dragged past its neighbour.
+     * Nothing happens here but measuring: where the press was, and where inside the tab it
+     * landed, so the tab does not jump under the pointer when it lifts. The drag itself begins
+     * in onTabDrag, DRAG_THRESHOLD pixels later, so a press that turns out to be a click leaves
+     * the row exactly as it found it. Listeners go on the window rather than the tab for the
+     * reason onGrab gives: a tab that stopped tracking when the pointer left it would be a tab
+     * that cannot be dragged past its neighbour.
      */
     onTabGrab(id, event) {
       // Left button only - middle closes the tab - and not on the hover controls, which have
@@ -591,8 +599,16 @@ export default {
         return;
       }
 
+      this.tabOffset = 0;
       this.tabDrag = {
-        id, startX: event.clientX, x: event.clientX, moved: false, cancelled: false, scroll: null, step: 0,
+        id,
+        startX:    event.clientX,
+        x:         event.clientX,
+        /** Where in the tab the pointer took hold, measured from its left edge. */
+        grab:      event.clientX - event.currentTarget.getBoundingClientRect().left,
+        moved:     false,
+        cancelled: false,
+        frame:     null,
       };
 
       window.addEventListener('mousemove', this.onTabDrag);
@@ -609,21 +625,65 @@ export default {
       if (!drag.moved && Math.abs(event.clientX - drag.startX) < DRAG_THRESHOLD) {
         return;
       }
-      drag.moved = true;
+      if (!drag.moved) {
+        drag.moved = true;
+        drag.frame = requestAnimationFrame(this.tabFrame);
+      }
       drag.x = event.clientX;
       // Dragging is not selecting: the labels would otherwise highlight across the row as the
       // pointer crosses them.
       event.preventDefault();
+    },
+
+    /**
+     * One frame of the drag.
+     *
+     * A frame rather than a mousemove, because two of the three things here have to keep
+     * happening when the pointer is not moving: a drag parked against the end of the row goes
+     * on scrolling it, and the tabs it scrolls past go on being passed. The third, putting the
+     * lifted tab under the pointer, has to be measured after Vue has laid the row out again -
+     * which a frame is, since Vue patches the DOM on a microtask and microtasks run first.
+     */
+    tabFrame() {
+      const drag = this.tabDrag;
+
+      if (!drag || drag.cancelled) {
+        return;
+      }
       this.edgeScroll();
       this.reorderAt(drag.x);
+      this.liftToPointer();
+      drag.frame = requestAnimationFrame(this.tabFrame);
+    },
+
+    /**
+     * Where each tab sits in the row, ignoring the lift.
+     *
+     * The dragged tab is drawn translated, so its own rect is where it is being shown rather
+     * than where the row has put it - and where the row has put it is the question every
+     * measurement here is asking. Taking the offset back off is the correction; the transform
+     * does not affect layout, so nothing else needs one.
+     */
+    tabSlots() {
+      const row = this.$refs.tabs;
+      const drag = this.tabDrag;
+
+      if (!row || !drag) {
+        return [];
+      }
+
+      return [...row.querySelectorAll('.mc-agent__tab')].map((el, i) => {
+        const box = el.getBoundingClientRect();
+        const shift = this.sessions[i]?.id === drag.id ? this.tabOffset : 0;
+
+        return {
+          el, left: box.left - shift, right: box.right - shift, width: box.width,
+        };
+      });
     },
 
     /**
      * Move the dragged tab if the pointer has passed a neighbour.
-     *
-     * The tab is reordered in the row itself rather than lifted out of it and flown around: the
-     * row is the preview, so what is under the pointer when the button comes up is what has
-     * already happened, and there is no second layout to keep in step with the first.
      *
      * "Passed" is the midpoint of the neighbour, measured in the direction of travel. Swapping
      * as soon as the pointer is anywhere over a neighbour oscillates when the two are different
@@ -632,24 +692,18 @@ export default {
      */
     reorderAt(clientX) {
       const drag = this.tabDrag;
-      const row = this.$refs.tabs;
 
-      if (!drag || !row) {
+      if (!drag) {
         return;
       }
-      const tabs = [...row.querySelectorAll('.mc-agent__tab')];
+      const slots = this.tabSlots();
       const from = this.sessions.findIndex((session) => session.id === drag.id);
-      const over = tabs.findIndex((el) => {
-        const box = el.getBoundingClientRect();
-
-        return clientX >= box.left && clientX <= box.right;
-      });
+      const over = slots.findIndex((slot) => clientX >= slot.left && clientX <= slot.right);
 
       if (from < 0 || over < 0 || over === from) {
         return;
       }
-      const box = tabs[over].getBoundingClientRect();
-      const middle = box.left + (box.width / 2);
+      const middle = slots[over].left + (slots[over].width / 2);
 
       if (over > from ? clientX > middle : clientX < middle) {
         this.moveTab(from, over);
@@ -657,13 +711,33 @@ export default {
     },
 
     /**
-     * Keep scrolling while the drag is held against either end of the row.
+     * Draw the dragged tab under the pointer, held inside the row.
      *
-     * The row scrolls sideways when there are more conversations than fit, and a drag that could
-     * only move tabs it can already see would not reach the ones it cannot. Driven by animation
-     * frames rather than by the pointer, because the pointer stops sending events the moment it
-     * stops moving, which is exactly when it is parked against the edge - and each frame asks
-     * for the reorder too, so tabs scrolling under a still pointer are passed like any other.
+     * Inside, because this is rearranging rather than tearing out: a tab that could be dragged
+     * off the end would be offering something the row does not do. While it is held at an end
+     * edgeScroll is bringing the rest of the row past it, which is the same gesture and reads
+     * as one.
+     */
+    liftToPointer() {
+      const drag = this.tabDrag;
+      const row = this.$refs.tabs;
+      const slot = this.tabSlots()[this.sessions.findIndex((session) => session.id === drag?.id)];
+
+      if (!drag || !row || !slot) {
+        return;
+      }
+      const box = row.getBoundingClientRect();
+      const wanted = drag.x - drag.grab;
+      const held = Math.min(Math.max(wanted, box.left), Math.max(box.left, box.right - slot.width));
+
+      this.tabOffset = held - slot.left;
+    },
+
+    /**
+     * Scroll the row while the drag is held against either end.
+     *
+     * The row scrolls sideways when there are more conversations than fit, and a drag that
+     * could only move tabs it can already see would not reach the ones it cannot.
      */
     edgeScroll() {
       const drag = this.tabDrag;
@@ -674,35 +748,10 @@ export default {
       }
       const box = row.getBoundingClientRect();
 
-      drag.step = drag.x < box.left + EDGE_ZONE ? -EDGE_SCROLL : drag.x > box.right - EDGE_ZONE ? EDGE_SCROLL : 0;
-
-      if (!drag.step) {
-        this.stopEdgeScroll();
-
-        return;
-      }
-      if (drag.scroll) {
-        return;
-      }
-
-      const tick = () => {
-        const held = this.tabDrag;
-
-        if (!held || !held.scroll) {
-          return;
-        }
-        row.scrollLeft += held.step;
-        this.reorderAt(held.x);
-        held.scroll = requestAnimationFrame(tick);
-      };
-
-      drag.scroll = requestAnimationFrame(tick);
-    },
-
-    stopEdgeScroll() {
-      if (this.tabDrag?.scroll) {
-        cancelAnimationFrame(this.tabDrag.scroll);
-        this.tabDrag.scroll = null;
+      if (drag.x < box.left + EDGE_ZONE) {
+        row.scrollLeft -= EDGE_SCROLL;
+      } else if (drag.x > box.right - EDGE_ZONE) {
+        row.scrollLeft += EDGE_SCROLL;
       }
     },
 
@@ -719,8 +768,8 @@ export default {
       }
       event.preventDefault();
       event.stopPropagation();
-      this.stopEdgeScroll();
       this.tabDrag.cancelled = true;
+      this.tabOffset = 0;
       this.sessions = arrange(this.sessions, this.order);
     },
 
@@ -730,8 +779,11 @@ export default {
       if (!drag) {
         return;
       }
-      this.stopEdgeScroll();
+      if (drag.frame) {
+        cancelAnimationFrame(drag.frame);
+      }
       this.tabDrag = null;
+      this.tabOffset = 0;
       window.removeEventListener('mousemove', this.onTabDrag);
       window.removeEventListener('mouseup', this.endTabDrag);
       window.removeEventListener('keydown', this.onTabDragKey, true);
@@ -755,11 +807,54 @@ export default {
 
     /** Put one tab at another's index, without disturbing the rest. */
     moveTab(from, to) {
+      const row = this.$refs.tabs;
+      const was = row ? new Map([...row.querySelectorAll('.mc-agent__tab')]
+        .map((el, i) => [this.sessions[i]?.id, el.getBoundingClientRect().left])) : null;
       const next = [...this.sessions];
       const [moved] = next.splice(from, 1);
 
       next.splice(to, 0, moved);
       this.sessions = next;
+
+      if (was) {
+        this.$nextTick(() => this.slideAside(was));
+      }
+    },
+
+    /**
+     * Slide the tabs that moved aside, rather than letting them jump.
+     *
+     * The row reorders by re-rendering, and a re-render is not something CSS can transition -
+     * the tab is simply somewhere else on the next frame. So the oldest trick: put each one
+     * back where it was with a transform, then take the transform off with the transition on,
+     * and it travels the distance it had already jumped. The dragged tab is left out; its
+     * transform is the pointer's and must not be animated behind it.
+     */
+    slideAside(was) {
+      const row = this.$refs.tabs;
+
+      if (!row) {
+        return;
+      }
+      [...row.querySelectorAll('.mc-agent__tab')].forEach((el, i) => {
+        const id = this.sessions[i]?.id;
+        const before = was.get(id);
+
+        if (!id || before === undefined || id === this.tabDrag?.id) {
+          return;
+        }
+        const delta = before - el.getBoundingClientRect().left;
+
+        if (!delta) {
+          return;
+        }
+        el.style.transition = 'none';
+        el.style.transform = `translateX(${ delta }px)`;
+        requestAnimationFrame(() => {
+          el.style.transition = '';
+          el.style.transform = '';
+        });
+      });
     },
 
     /**
@@ -953,8 +1048,9 @@ export default {
           class="mc-agent__tab"
           :class="{
             'mc-agent__tab--active': session.id === active,
-            'mc-agent__tab--lifted': tabDrag && tabDrag.moved && tabDrag.id === session.id,
+            'mc-agent__tab--lifted': lifted === session.id,
           }"
+          :style="lifted === session.id ? { transform: `translateX(${ tabOffset }px)` } : null"
           role="tab"
           :tabindex="session.id === active ? 0 : -1"
           :aria-selected="session.id === active"
@@ -1423,16 +1519,29 @@ export default {
       padding-right: 10px;
     }
 
-    // The tab under the pointer during a drag. It is in the row rather than flying above it -
-    // the row is its own preview - so this says which one is being moved and nothing more.
+    // A tab that has moved aside for a drag travels there rather than appearing there. The
+    // distance is set in slideAside, which is also where the dragged tab is kept out of this:
+    // its transform is the pointer's, and a transition on that is the tab lagging behind the
+    // hand holding it.
+    transition: transform 120ms ease;
+
+    // The tab being dragged. It rides above the row under the pointer, faint enough to read as
+    // held rather than placed. The slot it was lifted out of is left empty, and that gap - which
+    // the neighbours slide to open and close - is where it lands when the button comes up.
+    //
     // The resting cursor stays `pointer`: a tab is a thing you click, and browser tabs have
-    // spent twenty years teaching that one can be dragged without a hand to say so.
+    // spent twenty years teaching that one can also be dragged without a hand to say so.
     &--lifted {
+      z-index: 2;
+      opacity: 0.6;
       background: var(--default-hover-bg, var(--body-bg));
-      opacity: 0.75;
+      border-radius: 3px;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
       cursor: grabbing;
+      transition: none;
     }
   }
+
 
   &__tab-title {
     min-width: 0;
