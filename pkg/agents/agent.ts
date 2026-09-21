@@ -388,14 +388,38 @@ interface SessionActivity {
 const WORKING_WINDOW_S = 90;
 
 /**
+ * The hook events that are the last word on a conversation, when they are the latest thing to
+ * have happened.
+ *
+ * `Stop` and `SessionEnd` say the turn is over, and both fire after the final writes of that
+ * turn land - so for a few seconds afterwards the transcript still looks like it is moving.
+ * `Notification` says claude is waiting, and it fires right after the tool call it is asking
+ * permission for was written down. Each of those has to be able to overrule a transcript that
+ * has only just stopped, which is what the few seconds of margin below are for.
+ *
+ * `SessionStart` and `UserPromptSubmit` are not on this list, and that is the point of having
+ * one: neither says anything about whether claude is busy now.
+ */
+const SPEAKS_LAST = new Set(['Stop', 'SessionEnd', 'Notification']);
+
+/**
  * The bucket a conversation falls in, from what the pod reported about it.
  *
  * A copy of the Dev extension's `agentStateOf` rather than a call to it: the two extensions do
  * not import across each other, and this is the one derivation both need to make the same way.
- * The transcript, when it has moved since the hook last spoke, outranks the hook: a hook fires
- * only at a turn's edges, so a turn spent inside subagents reads as finished to it while the
- * subagents write all the while, and a permission prompt answered in the terminal leaves the
- * last Notification standing over an agent that is working again.
+ * The transcript outranks the hook: a hook fires only at a turn's edges, so a turn spent inside
+ * subagents reads as finished to it while the subagents write all the while, and a permission
+ * prompt answered in the terminal leaves the last Notification standing over an agent that is
+ * working again.
+ *
+ * The margin that lets a hook win back used to apply to every event, and `SessionStart` is
+ * where that was wrong. It means claude is up; it does not mean claude is idle - and the switch
+ * below has no case for it, so it fell through to `idle`, a guess presented as a fact. After an
+ * auto-compact it is the wrong guess every time: the CLI fires SessionStart the moment it has
+ * finished compacting and then carries straight on with the rest of the turn, while the
+ * transcript, quiet all through the compaction, is the only thing that knows. Replayed over
+ * this pod's own conversations, letting it know halves the samples where a working conversation
+ * was showing an idle dot.
  */
 function activityState(a: SessionActivity): AgentActivity {
   if (!a.alive) {
@@ -403,8 +427,9 @@ function activityState(a: SessionActivity): AgentActivity {
   }
 
   const hookAgo = (Date.now() - (Date.parse(a.at) || 0)) / 1000;
+  const overruled = SPEAKS_LAST.has(a.event) && hookAgo <= a.wroteAgo + 5;
 
-  if (a.wroteAgo >= 0 && a.wroteAgo <= WORKING_WINDOW_S && a.wroteAgo + 5 < hookAgo) {
+  if (a.wroteAgo >= 0 && a.wroteAgo <= WORKING_WINDOW_S && !overruled) {
     return 'working';
   }
   if (a.event === 'Notification' && a.notification && a.notification !== 'idle_prompt') {
