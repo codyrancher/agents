@@ -71,6 +71,16 @@ HOME_DIR="$AGENT_HOME" /bin/sh /seed/terminal-tools.sh >"$WORKSPACE/.terminal-to
   /bin/sh /seed/mount-downstream.sh
 ) >"$WORKSPACE/.mounts.log" 2>&1 &
 
+# A downstream workspace also needs the shared github-browser, which it cannot reach on its own
+# cluster. This daemon tunnels the browser's CDP into each downstream pod at 127.0.0.1:9223 over the
+# same kubectl-exec channel (ssh reverse-forward), so a github media upload run there works like a
+# local one. Needs an ssh client here; sshd is installed into each workspace pod by the daemon.
+# See /seed/tunnel-browser.sh. Backgrounded, tools installed first, like the mount above.
+(
+  command -v ssh >/dev/null 2>&1 || { apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq openssh-client >/dev/null 2>&1; }
+  /bin/sh /seed/tunnel-browser.sh
+) >"$WORKSPACE/.tunnel.log" 2>&1 &
+
 # The container's only remaining job is to stay up so there is something to exec into. `tail -f`
 # on /dev/null is the smallest thing that does that and says nothing; a `sleep` with a number on
 # it would end, and a pod that ends is a pod Kubernetes restarts for no reason.
