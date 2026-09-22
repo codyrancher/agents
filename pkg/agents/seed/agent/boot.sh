@@ -81,6 +81,13 @@ HOME_DIR="$AGENT_HOME" /bin/sh /seed/terminal-tools.sh >"$WORKSPACE/.terminal-to
   /bin/sh /seed/tunnel-browser.sh
 ) >"$WORKSPACE/.tunnel.log" 2>&1 &
 
+# Report each downstream workspace's live state into the registrar dev-api keeps, since dev-api runs
+# on local and cannot see downstream pods but this pod can. No extra tools (kubectl + node already
+# here), so it launches straight away. See /seed/registrar-state.sh.
+(
+  /bin/sh /seed/registrar-state.sh
+) >"$WORKSPACE/.registrar.log" 2>&1 &
+
 # The container's only remaining job is to stay up so there is something to exec into. `tail -f`
 # on /dev/null is the smallest thing that does that and says nothing; a `sleep` with a number on
 # it would end, and a pod that ends is a pod Kubernetes restarts for no reason.
