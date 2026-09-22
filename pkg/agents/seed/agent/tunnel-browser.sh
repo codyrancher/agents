@@ -36,10 +36,12 @@ PUB=$(cat "$KEY.pub")
 
 # kubectl exec into a downstream workspace pod, through that cluster's Rancher proxy with the durable
 # token - the same address the mount and dev-shell build. $1.. are the argv to run in the pod.
+# No -i, and stdin from /dev/null: this runs inside a `while read` piped from kubectl, and an exec
+# that holds stdin would swallow the rest of that list, so only the first workspace got a tunnel.
 kexec() {
   name=$1; cluster=$2; shift 2
   kubectl --server="$RURL/k8s/clusters/$cluster" --token="$TOKEN" --insecure-skip-tls-verify=true \
-    exec -i -n "dev-$name" "deploy/dev-$name" -c workspace -- "$@"
+    exec -n "dev-$name" "deploy/dev-$name" -c workspace -- "$@" </dev/null
 }
 
 # Install sshd, a host key, and our pubkey in the workspace pod. Idempotent and fast once present.
@@ -77,7 +79,7 @@ tunnel_one() {
     -o "ProxyCommand=$proxy" \
     -i "$KEY" \
     -R "127.0.0.1:$PORT:$BROWSER" \
-    root@downstream >/dev/null 2>&1 &
+    root@downstream >/dev/null 2>&1 </dev/null &
   echo $! > "$pidf"
   echo "$(date -u +%FT%TZ) tunnel up for $name ($cluster)"
 }
