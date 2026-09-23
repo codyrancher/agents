@@ -22,6 +22,8 @@ import { VERSION_ANNOTATION, contentVersion, ensureCurrent } from './ensure';
 import { AGENT_FILES } from './seed.generated';
 import { rancherFetch } from './api';
 
+type Json = any; // eslint-disable-line @typescript-eslint/no-explicit-any
+
 export { AGENT_OBJECT, AGENT_CONTAINER };
 
 /**
@@ -122,15 +124,37 @@ export function agentConfigMapBody(): Record<string, unknown> {
   };
 }
 
+/**
+ * The Deployment, with its own shape in its fingerprint.
+ *
+ * The fingerprint used to be the seed's hash alone, and the seed is a set of scripts - so a
+ * change to *this* function changed nothing that `replaceIfStale` compares, and the running
+ * Deployment kept whatever spec it was created with for ever. That is not hypothetical: a
+ * `/workspaces` mount asking for Bidirectional propagation got into the live Deployment, the
+ * node cannot give that (`/var/lib/rancher` is not a shared mount), and every container
+ * creation failed with CreateContainerError - so the pod was gone, every conversation with it,
+ * and reinstalling the extension changed nothing because the fingerprint still matched.
+ *
+ * So the spec is hashed into the annotation as well. Editing the mounts, the account, the
+ * image or the strategy now reaches a cluster that already has this object, which is what the
+ * reconcile was for.
+ */
 export function agentDeploymentBody(): Record<string, unknown> {
+  const body = deploymentSpec();
+
+  (body.metadata as Json).annotations = { [VERSION_ANNOTATION]: contentVersion([agentSourceVersion(), JSON.stringify(body.spec)]) };
+
+  return body;
+}
+
+function deploymentSpec(): Record<string, unknown> {
   return {
     apiVersion: 'apps/v1',
     kind:       'Deployment',
     metadata:   {
-      namespace:   EXT_NS,
-      name:        AGENT_OBJECT,
-      labels:      { app: AGENT_OBJECT },
-      annotations: { [VERSION_ANNOTATION]: agentSourceVersion() },
+      namespace: EXT_NS,
+      name:      AGENT_OBJECT,
+      labels:    { app: AGENT_OBJECT },
     },
     spec: {
       replicas: 1,
